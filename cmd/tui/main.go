@@ -48,13 +48,57 @@ type User struct {
 	ID             string `json:"id"`
 	Email          string `json:"email"`
 	PublicKey      string `json:"public_key"`
-	PrivateKey     string `json:"private_key"`
+	PrivateKey     string `json:"-"`
 	Address        string `json:"address"`
 	AssignedNodeID string `json:"assigned_node_id"`
 	Plan           string `json:"plan"`
 	BandwidthUsed  int64  `json:"bandwidth_used"`
 	BandwidthLimit int64  `json:"bandwidth_limit"`
 	CreatedAt      string `json:"created_at"`
+}
+
+type SecurityStatus struct {
+	Timestamp          string            `json:"timestamp"`
+	Fail2Ban           Fail2BanStatus    `json:"fail2ban"`
+	SSH                SSHSecStatus      `json:"ssh"`
+	UnattendedUpgrades UpgradeStatus     `json:"unattended_upgrades"`
+	Firewall           FirewallStatus    `json:"firewall"`
+	TLS                TLSSecStatus      `json:"tls"`
+}
+
+type Fail2BanStatus struct {
+	Installed       bool `json:"installed"`
+	Active          bool `json:"active"`
+	SSHJail         bool `json:"ssh_jail_enabled"`
+	CurrentlyBanned int  `json:"currently_banned"`
+	TotalBanned     int  `json:"total_banned"`
+	CurrentFailed   int  `json:"current_failed"`
+	TotalFailed     int  `json:"total_failed"`
+}
+
+type SSHSecStatus struct {
+	PermitRootLogin      string `json:"permit_root_login"`
+	PasswordAuth         bool   `json:"password_auth"`
+	X11Forwarding        bool   `json:"x11_forwarding"`
+	MaxAuthTries         int    `json:"max_auth_tries"`
+	RootLoginHardened    bool   `json:"root_login_hardened"`
+	PasswordAuthDisabled bool   `json:"password_auth_disabled"`
+}
+
+type UpgradeStatus struct {
+	Installed bool   `json:"installed"`
+	Active    bool   `json:"active"`
+	LastRun   string `json:"last_run,omitempty"`
+}
+
+type FirewallStatus struct {
+	Active bool     `json:"active"`
+	Rules  []string `json:"rules"`
+}
+
+type TLSSecStatus struct {
+	Enabled  bool   `json:"enabled"`
+	CertFile string `json:"cert_file,omitempty"`
 }
 
 type BandwidthEntry struct {
@@ -71,13 +115,14 @@ type BandwidthEntry struct {
 // ---------------------------------------------------------------------------
 
 type Snapshot struct {
-	Healthy       bool
-	Nodes         []Node
-	Users         []User
-	NodeBandwidth map[string][]BandwidthEntry
-	TotalBWIn     int64
-	TotalBWOut    int64
-	FetchedAt     time.Time
+	Healthy        bool
+	Nodes          []Node
+	Users          []User
+	NodeBandwidth  map[string][]BandwidthEntry
+	NodeSecurity   map[string]*SecurityStatus
+	TotalBWIn      int64
+	TotalBWOut     int64
+	FetchedAt      time.Time
 }
 
 // ---------------------------------------------------------------------------
@@ -167,11 +212,21 @@ func (c *APIClient) GetNodeBandwidth(nodeID string) ([]BandwidthEntry, error) {
 	return entries, err
 }
 
+func (c *APIClient) GetNodeSecurity(nodeID string) (*SecurityStatus, error) {
+	var status SecurityStatus
+	err := c.get(fmt.Sprintf("/api/nodes/%s/security", nodeID), &status)
+	if err != nil {
+		return nil, err
+	}
+	return &status, nil
+}
+
 // fetchSnapshot does all API calls and returns an immutable Snapshot.
 // Runs on the poller goroutine — never touches UI.
 func (c *APIClient) fetchSnapshot() Snapshot {
 	snap := Snapshot{
 		NodeBandwidth: make(map[string][]BandwidthEntry),
+		NodeSecurity:  make(map[string]*SecurityStatus),
 		FetchedAt:     time.Now(),
 	}
 
@@ -189,6 +244,10 @@ func (c *APIClient) fetchSnapshot() Snapshot {
 					snap.TotalBWIn += e.TotalReceived
 					snap.TotalBWOut += e.TotalSent
 				}
+			}
+			sec, err := c.GetNodeSecurity(node.ID)
+			if err == nil {
+				snap.NodeSecurity[node.ID] = sec
 			}
 		}
 	}
@@ -350,6 +409,10 @@ type TUI struct {
 	dashboardPage *tview.Flex
 	nodesPage     *tview.Flex
 	usersPage     *tview.Flex
+	securityPage  *tview.Flex
+
+	// Security widgets
+	securityView *tview.TextView
 
 	// Dashboard widgets
 	statBoxes *tview.Flex
@@ -369,6 +432,7 @@ func NewTUI() *TUI {
 		app: tview.NewApplication(),
 		snap: Snapshot{
 			NodeBandwidth: make(map[string][]BandwidthEntry),
+			NodeSecurity:  make(map[string]*SecurityStatus),
 		},
 		api: NewAPIClient(),
 	}
@@ -399,13 +463,15 @@ func (t *TUI) buildUI() {
 	t.buildDashboardPage()
 	t.buildNodesPage()
 	t.buildUsersPage()
+	t.buildSecurityPage()
 
 	// Content area with pages
 	t.contentArea = tview.NewFlex()
 	t.pages = tview.NewPages().
 		AddPage("dashboard", t.dashboardPage, true, true).
 		AddPage("nodes", t.nodesPage, true, false).
-		AddPage("users", t.usersPage, true, false)
+		AddPage("users", t.usersPage, true, false).
+		AddPage("security", t.securityPage, true, false)
 
 	// Main layout
 	t.mainFlex = tview.NewFlex().SetDirection(tview.FlexRow).
@@ -475,7 +541,7 @@ func (t *TUI) handleInput(event *tcell.EventKey) *tcell.EventKey {
 		t.app.Stop()
 		return nil
 	case tcell.KeyTab:
-		t.ui.activeTab = (t.ui.activeTab + 1) % 3
+		t.ui.activeTab = (t.ui.activeTab + 1) % 4
 		t.switchTab()
 		return nil
 	case tcell.KeyEscape:
@@ -511,6 +577,10 @@ func (t *TUI) handleInput(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	case '3':
 		t.ui.activeTab = 2
+		t.switchTab()
+		return nil
+	case '4':
+		t.ui.activeTab = 3
 		t.switchTab()
 		return nil
 	case 's':
@@ -599,6 +669,169 @@ func (t *TUI) buildUsersPage() {
 		AddItem(t.userTable, 0, 1, true)
 }
 
+func (t *TUI) buildSecurityPage() {
+	t.securityView = tview.NewTextView().
+		SetDynamicColors(true).
+		SetScrollable(true)
+	t.securityView.SetBackgroundColor(tcell.NewRGBColor(15, 15, 25))
+	t.securityView.SetBorder(true).
+		SetTitle(" Security Hardening Status ").
+		SetTitleColor(colorCyan).
+		SetBorderColor(tcell.NewRGBColor(60, 60, 100))
+
+	t.securityPage = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(t.securityView, 0, 1, true)
+}
+
+func (t *TUI) refreshSecurityView() {
+	var sb strings.Builder
+
+	if len(t.snap.Nodes) == 0 {
+		sb.WriteString("\n [gray]No nodes available[-]")
+		t.securityView.SetText(sb.String())
+		return
+	}
+
+	for _, node := range t.snap.Nodes {
+		sec := t.snap.NodeSecurity[node.ID]
+
+		location := friendlyRegion(node.Region)
+		sb.WriteString(fmt.Sprintf("\n [bold][cyan]%s[-] [white]— %s[-] [gray](%s)[-]\n", node.Name, location, node.IP))
+		sb.WriteString(fmt.Sprintf(" %s\n", strings.Repeat("─", 70)))
+
+		if sec == nil {
+			sb.WriteString(" [red]Unable to retrieve security status[-]\n\n")
+			continue
+		}
+
+		// TLS
+		if sec.TLS.Enabled {
+			sb.WriteString(" [green]✓[-] [bold]TLS[-]                    [green]Enabled[-]\n")
+		} else {
+			sb.WriteString(" [red]✗[-] [bold]TLS[-]                    [red]Disabled[-] — traffic unencrypted\n")
+		}
+
+		// Fail2Ban
+		if sec.Fail2Ban.Active {
+			sb.WriteString(fmt.Sprintf(" [green]✓[-] [bold]Fail2Ban[-]               [green]Active[-]"))
+			if sec.Fail2Ban.SSHJail {
+				sb.WriteString(fmt.Sprintf("  SSH jail: [white]%d[-] banned, [white]%d[-] failed",
+					sec.Fail2Ban.CurrentlyBanned, sec.Fail2Ban.CurrentFailed))
+			}
+			sb.WriteString("\n")
+			sb.WriteString(fmt.Sprintf("                              Total banned: [yellow]%d[-]  Total failed: [yellow]%d[-]\n",
+				sec.Fail2Ban.TotalBanned, sec.Fail2Ban.TotalFailed))
+		} else if sec.Fail2Ban.Installed {
+			sb.WriteString(" [yellow]![-] [bold]Fail2Ban[-]               [yellow]Installed but inactive[-]\n")
+		} else {
+			sb.WriteString(" [red]✗[-] [bold]Fail2Ban[-]               [red]Not installed[-]\n")
+		}
+
+		// SSH
+		sb.WriteString(" ")
+		if sec.SSH.RootLoginHardened {
+			sb.WriteString("[green]✓[-]")
+		} else {
+			sb.WriteString("[red]✗[-]")
+		}
+		sb.WriteString(fmt.Sprintf(" [bold]SSH Root Login[-]         [white]%s[-]", sec.SSH.PermitRootLogin))
+		if sec.SSH.RootLoginHardened {
+			sb.WriteString(" [green](hardened)[-]")
+		} else {
+			sb.WriteString(" [red](vulnerable)[-]")
+		}
+		sb.WriteString("\n")
+
+		sb.WriteString(" ")
+		if sec.SSH.PasswordAuthDisabled {
+			sb.WriteString("[green]✓[-]")
+		} else {
+			sb.WriteString("[red]✗[-]")
+		}
+		sb.WriteString(" [bold]SSH Password Auth[-]      ")
+		if sec.SSH.PasswordAuthDisabled {
+			sb.WriteString("[green]Disabled[-]\n")
+		} else {
+			sb.WriteString("[red]Enabled[-] — brute force risk\n")
+		}
+
+		sb.WriteString(" ")
+		if !sec.SSH.X11Forwarding {
+			sb.WriteString("[green]✓[-]")
+		} else {
+			sb.WriteString("[yellow]![-]")
+		}
+		sb.WriteString(" [bold]X11 Forwarding[-]        ")
+		if sec.SSH.X11Forwarding {
+			sb.WriteString("[yellow]Enabled[-]\n")
+		} else {
+			sb.WriteString("[green]Disabled[-]\n")
+		}
+
+		sb.WriteString(fmt.Sprintf(" [white]·[-] [bold]Max Auth Tries[-]        [white]%d[-]", sec.SSH.MaxAuthTries))
+		if sec.SSH.MaxAuthTries <= 3 {
+			sb.WriteString(" [green](good)[-]")
+		} else if sec.SSH.MaxAuthTries <= 6 {
+			sb.WriteString(" [yellow](default)[-]")
+		} else {
+			sb.WriteString(" [red](too high)[-]")
+		}
+		sb.WriteString("\n")
+
+		// Unattended Upgrades
+		if sec.UnattendedUpgrades.Active {
+			lastRun := sec.UnattendedUpgrades.LastRun
+			if lastRun == "" {
+				lastRun = "never"
+			}
+			sb.WriteString(fmt.Sprintf(" [green]✓[-] [bold]Auto Security Updates[-]  [green]Active[-]  Last run: [white]%s[-]\n", lastRun))
+		} else if sec.UnattendedUpgrades.Installed {
+			sb.WriteString(" [yellow]![-] [bold]Auto Security Updates[-]  [yellow]Installed but inactive[-]\n")
+		} else {
+			sb.WriteString(" [red]✗[-] [bold]Auto Security Updates[-]  [red]Not installed[-]\n")
+		}
+
+		// Firewall
+		if sec.Firewall.Active {
+			sb.WriteString(fmt.Sprintf(" [green]✓[-] [bold]Firewall (UFW)[-]        [green]Active[-]  [white]%d rules[-]\n", len(sec.Firewall.Rules)))
+		} else {
+			sb.WriteString(" [red]✗[-] [bold]Firewall (UFW)[-]        [red]Inactive[-]\n")
+		}
+
+		// Score
+		score := 0
+		total := 6
+		if sec.TLS.Enabled {
+			score++
+		}
+		if sec.Fail2Ban.Active && sec.Fail2Ban.SSHJail {
+			score++
+		}
+		if sec.SSH.RootLoginHardened {
+			score++
+		}
+		if sec.SSH.PasswordAuthDisabled {
+			score++
+		}
+		if sec.UnattendedUpgrades.Active {
+			score++
+		}
+		if sec.Firewall.Active {
+			score++
+		}
+
+		scoreColor := "red"
+		if score == total {
+			scoreColor = "green"
+		} else if score >= total-1 {
+			scoreColor = "yellow"
+		}
+		sb.WriteString(fmt.Sprintf("\n [bold]Security Score: [%s]%d/%d[-][-]\n\n", scoreColor, score, total))
+	}
+
+	t.securityView.SetText(sb.String())
+}
+
 func (t *TUI) switchTab() {
 	switch t.ui.activeTab {
 	case 0:
@@ -612,6 +845,9 @@ func (t *TUI) switchTab() {
 		t.refreshUsersTable()
 		t.pages.SwitchToPage("users")
 		t.app.SetFocus(t.userTable)
+	case 3:
+		t.refreshSecurityView()
+		t.pages.SwitchToPage("security")
 	}
 	t.updateTabBar()
 	t.updateFooter()
@@ -640,7 +876,7 @@ func (t *TUI) updateHeader() {
 }
 
 func (t *TUI) updateTabBar() {
-	tabs := []string{"Dashboard", "Nodes", "Users"}
+	tabs := []string{"Dashboard", "Nodes", "Users", "Security"}
 	var parts []string
 	for i, name := range tabs {
 		if i == t.ui.activeTab {
@@ -656,15 +892,17 @@ func (t *TUI) updateFooter() {
 	var hint string
 	switch t.ui.activeTab {
 	case 0:
-		hint = "[cyan]1-3[-] tabs  [cyan]?[-] help  [cyan]q[-] quit"
+		hint = "[cyan]1-4[-] tabs  [cyan]?[-] help  [cyan]q[-] quit"
 	case 1:
-		hint = "[cyan]↑↓[-] navigate  [cyan]Enter[-] detail  [cyan]s[-] sort  [cyan]r[-] reverse  [cyan]1-3[-] tabs  [cyan]?[-] help  [cyan]q[-] quit"
+		hint = "[cyan]↑↓[-] navigate  [cyan]Enter[-] detail  [cyan]s[-] sort  [cyan]r[-] reverse  [cyan]1-4[-] tabs  [cyan]?[-] help  [cyan]q[-] quit"
 	case 2:
 		filter := ""
 		if t.ui.userFilter != "" {
 			filter = fmt.Sprintf("  [yellow]filter: %s[-]", t.ui.userFilter)
 		}
 		hint = fmt.Sprintf("[cyan]↑↓[-] navigate  [cyan]Enter[-] detail  [cyan]/[-] filter  [cyan]Esc[-] clear  [cyan]s[-] sort  [cyan]r[-] reverse  [cyan]q[-] quit%s", filter)
+	case 3:
+		hint = "[cyan]1-4[-] tabs  [cyan]?[-] help  [cyan]q[-] quit"
 	}
 	t.footer.SetText(hint)
 }
@@ -1317,6 +1555,8 @@ func (t *TUI) applySnapshot(snap Snapshot) {
 		t.refreshNodesTable()
 	case 2:
 		t.refreshUsersTable()
+	case 3:
+		t.refreshSecurityView()
 	}
 }
 

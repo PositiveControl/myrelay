@@ -2,6 +2,7 @@ package api
 
 import (
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -16,12 +17,14 @@ import (
 
 // Server is the control plane HTTP API server.
 type Server struct {
-	addr   string
-	db     *db.DB
-	auth   *Auth
-	agents *agent.Client
-	mux    *http.ServeMux
-	server *http.Server
+	addr      string
+	db        *db.DB
+	auth      *Auth
+	agents    *agent.Client
+	mux       *http.ServeMux
+	server    *http.Server
+	tlsConfig *tls.Config
+	useTLS    bool
 }
 
 // NewServer creates a configured API server.
@@ -50,6 +53,18 @@ func NewServer(addr string, database *db.DB, auth *Auth) *Server {
 	return s
 }
 
+// SetTLSConfig configures TLS for the server.
+func (s *Server) SetTLSConfig(tlsConfig *tls.Config) {
+	s.tlsConfig = tlsConfig
+	s.server.TLSConfig = tlsConfig
+	s.useTLS = true
+}
+
+// SetAgentTLS configures the agent client to use TLS with the given CA config.
+func (s *Server) SetAgentTLS(tlsConfig *tls.Config) {
+	s.agents.SetTLSConfig(tlsConfig)
+}
+
 // restoreAgents re-registers agent URLs from persisted node data.
 func (s *Server) restoreAgents() error {
 	nodes, err := s.db.ListNodes()
@@ -61,7 +76,11 @@ func (s *Server) restoreAgents() error {
 		return err
 	}
 	for _, node := range nodes {
-		agentURL := fmt.Sprintf("http://%s:8081", node.IP)
+		scheme := "http"
+		if s.useTLS {
+			scheme = "https"
+		}
+		agentURL := fmt.Sprintf("%s://%s:8081", scheme, node.IP)
 		token := tokens[node.ID]
 		s.agents.RegisterNode(node.ID, agentURL, token)
 		log.Printf("Restored agent registration for node %s (%s)", node.ID, node.IP)
@@ -69,9 +88,18 @@ func (s *Server) restoreAgents() error {
 	return nil
 }
 
-// Start begins listening for HTTP requests. Blocks until the server stops.
+// Start begins listening for requests. Uses TLS if configured. Blocks until the server stops.
 func (s *Server) Start() error {
-	log.Printf("API server listening on %s", s.addr)
+	// Re-register agents with correct scheme now that TLS state is finalized.
+	if err := s.restoreAgents(); err != nil {
+		log.Printf("Warning: failed to restore agent registrations: %v", err)
+	}
+
+	if s.useTLS {
+		log.Printf("API server listening on %s (TLS)", s.addr)
+		return s.server.ListenAndServeTLS("", "") // certs provided via TLSConfig
+	}
+	log.Printf("WARNING: API server listening on %s (no TLS)", s.addr)
 	return s.server.ListenAndServe()
 }
 
@@ -99,6 +127,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/nodes/{id}", s.auth.RequireAdmin(nodeHandler.Get))
 	s.mux.HandleFunc("POST /api/nodes/{id}/sync", s.auth.RequireAdmin(nodeHandler.Sync))
 	s.mux.HandleFunc("GET /api/nodes/{id}/bandwidth", s.auth.RequireAdmin(nodeHandler.GetBandwidth))
+	s.mux.HandleFunc("GET /api/nodes/{id}/security", s.auth.RequireAdmin(nodeHandler.GetSecurity))
 
 	// Node or admin.
 	s.mux.HandleFunc("POST /api/nodes/{id}/bandwidth", s.auth.RequireNodeOrAdmin(nodeHandler.ReportBandwidth))

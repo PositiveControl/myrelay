@@ -15,6 +15,9 @@ import (
 	"time"
 
 	"github.com/m7s/vpn/internal/bandwidth"
+	"github.com/m7s/vpn/internal/security"
+	"github.com/m7s/vpn/internal/tlsutil"
+	"github.com/m7s/vpn/internal/validate"
 	"github.com/m7s/vpn/internal/wireguard"
 )
 
@@ -24,6 +27,9 @@ func main() {
 	nodeID := flag.String("node-id", envOrDefault("NODE_ID", ""), "This node's ID in the control plane")
 	agentToken := flag.String("token", envOrDefault("AGENT_TOKEN", ""), "Agent authentication token")
 	listenAddr := flag.String("listen", envOrDefault("AGENT_LISTEN", ":8081"), "Agent HTTP listen address")
+	tlsCert := flag.String("tls-cert", envOrDefault("TLS_CERT_FILE", ""), "TLS certificate file")
+	tlsKey := flag.String("tls-key", envOrDefault("TLS_KEY_FILE", ""), "TLS key file")
+	tlsCACert := flag.String("tls-ca-cert", envOrDefault("TLS_CA_CERT", ""), "CA certificate for verifying API server")
 	pollInterval := flag.Duration("poll", 30*time.Second, "Bandwidth poll interval")
 	reportInterval := flag.Duration("report", 60*time.Second, "Report interval to control plane")
 	flag.Parse()
@@ -32,6 +38,12 @@ func main() {
 
 	if *nodeID == "" {
 		log.Fatal("node-id is required (set via -node-id flag or NODE_ID env var)")
+	}
+	if *agentToken == "" {
+		log.Fatal("agent token is required (set via -token flag or AGENT_TOKEN env var)")
+	}
+	if err := validate.InterfaceName(*iface); err != nil {
+		log.Fatalf("invalid interface name: %v", err)
 	}
 
 	log.Printf("Starting VPN agent for node %s on interface %s", *nodeID, *iface)
@@ -43,11 +55,18 @@ func main() {
 	defer mon.Stop()
 
 	// Start the agent HTTP server for peer management.
-	agentSrv := newAgentServer(*listenAddr, *iface, *agentToken)
+	agentSrv := newAgentServer(*listenAddr, *iface, *agentToken, *tlsCert)
 	go func() {
-		log.Printf("Agent HTTP server listening on %s", *listenAddr)
-		if err := agentSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("Agent HTTP server error: %v", err)
+		if *tlsCert != "" && *tlsKey != "" {
+			log.Printf("Agent HTTPS server listening on %s", *listenAddr)
+			if err := agentSrv.ListenAndServeTLS(*tlsCert, *tlsKey); err != nil && err != http.ErrServerClosed {
+				log.Printf("Agent HTTPS server error: %v", err)
+			}
+		} else {
+			log.Printf("WARNING: Agent HTTP server listening on %s (no TLS)", *listenAddr)
+			if err := agentSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("Agent HTTP server error: %v", err)
+			}
 		}
 	}()
 
@@ -68,7 +87,7 @@ func main() {
 			if len(peers) == 0 {
 				continue
 			}
-			if err := reportBandwidth(*apiURL, *nodeID, *agentToken, peers); err != nil {
+			if err := reportBandwidth(*apiURL, *nodeID, *agentToken, *tlsCACert, peers); err != nil {
 				log.Printf("Failed to report bandwidth: %v", err)
 			} else {
 				log.Printf("Reported bandwidth for %d peers", len(peers))
@@ -82,15 +101,12 @@ func main() {
 }
 
 // agentServer handles peer add/remove requests from the control plane.
-func newAgentServer(addr, iface, token string) *http.Server {
+func newAgentServer(addr, iface, token, tlsCertFile string) *http.Server {
+	tlsEnabled := tlsCertFile != ""
 	mux := http.NewServeMux()
 
 	requireToken := func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			if token == "" {
-				next(w, r)
-				return
-			}
 			h := r.Header.Get("Authorization")
 			provided := strings.TrimPrefix(h, "Bearer ")
 			if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
@@ -104,6 +120,11 @@ func newAgentServer(addr, iface, token string) *http.Server {
 	mux.HandleFunc("POST /peers", requireToken(handleAddPeer(iface)))
 	mux.HandleFunc("POST /peers/remove", requireToken(handleRemovePeer(iface)))
 	mux.HandleFunc("GET /peers", requireToken(handleListPeers(iface)))
+	mux.HandleFunc("GET /security", requireToken(func(w http.ResponseWriter, r *http.Request) {
+		status := security.Collect(tlsEnabled, tlsCertFile)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(status)
+	}))
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"status":"ok"}`)
@@ -133,6 +154,14 @@ func handleAddPeer(iface string) http.HandlerFunc {
 			http.Error(w, `{"error":"public_key and allowed_ips required"}`, http.StatusBadRequest)
 			return
 		}
+		if err := validate.WireGuardKey(req.PublicKey); err != nil {
+			http.Error(w, `{"error":"invalid public_key"}`, http.StatusBadRequest)
+			return
+		}
+		if err := validate.CIDR(req.AllowedIPs); err != nil {
+			http.Error(w, `{"error":"invalid allowed_ips"}`, http.StatusBadRequest)
+			return
+		}
 
 		if err := wireguard.SyncPeers(iface, req.PublicKey, req.AllowedIPs, false); err != nil {
 			log.Printf("Failed to add peer %s: %v", req.PublicKey, err)
@@ -156,6 +185,10 @@ func handleRemovePeer(iface string) http.HandlerFunc {
 		var req removePeerRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.PublicKey == "" {
 			http.Error(w, `{"error":"public_key required"}`, http.StatusBadRequest)
+			return
+		}
+		if err := validate.WireGuardKey(req.PublicKey); err != nil {
+			http.Error(w, `{"error":"invalid public_key"}`, http.StatusBadRequest)
 			return
 		}
 		pubkey := req.PublicKey
@@ -183,7 +216,7 @@ func handleListPeers(iface string) http.HandlerFunc {
 	}
 }
 
-func reportBandwidth(apiURL, nodeID, token string, peers []bandwidth.PeerBandwidth) error {
+func reportBandwidth(apiURL, nodeID, token, caCertPath string, peers []bandwidth.PeerBandwidth) error {
 	payload := map[string]any{
 		"node_id": nodeID,
 		"peers":   peers,
@@ -204,8 +237,15 @@ func reportBandwidth(apiURL, nodeID, token string, peers []bandwidth.PeerBandwid
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	if caCertPath != "" {
+		tlsCfg, err := tlsutil.ClientTLSConfig(caCertPath)
+		if err != nil {
+			return fmt.Errorf("failed to load CA cert: %w", err)
+		}
+		httpClient.Transport = &http.Transport{TLSClientConfig: tlsCfg}
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}

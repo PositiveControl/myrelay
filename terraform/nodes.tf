@@ -10,7 +10,11 @@ resource "hcloud_server" "vpn_node" {
   image       = var.image
   location    = each.value.location
 
-  ssh_keys = [data.hcloud_ssh_key.default.id]
+  ssh_keys     = [data.hcloud_ssh_key.default.id]
+  firewall_ids = [hcloud_firewall.vpn_node.id]
+
+  delete_protection  = true
+  rebuild_protection = true
 
   user_data = file("${path.module}/../scripts/setup-node.sh")
 

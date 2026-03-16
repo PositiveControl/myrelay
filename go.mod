@@ -1,8 +1,6 @@
 module github.com/m7s/vpn
 
-go 1.24.0
-
-toolchain go1.24.2
+go 1.24.4
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect

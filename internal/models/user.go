@@ -21,7 +21,7 @@ type User struct {
 	ID             string    `json:"id"`
 	Email          string    `json:"email"`
 	PublicKey      string    `json:"public_key"`
-	PrivateKey     string    `json:"private_key"`
+	PrivateKey     string    `json:"-"`
 	Address        string    `json:"address"`
 	AssignedNodeID string    `json:"assigned_node_id"`
 	Plan           Plan      `json:"plan"`

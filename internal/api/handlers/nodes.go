@@ -24,6 +24,7 @@ type NodeHandler struct {
 	db       *db.DB
 	tokenGen TokenGenerator
 	agents   *agent.Client
+	useTLS   bool
 
 	mu            sync.RWMutex
 	bandwidthData map[string][]bandwidth.PeerBandwidth // still in-memory, not critical to persist
@@ -32,6 +33,11 @@ type NodeHandler struct {
 // NewNodeHandler creates a handler backed by the database.
 func NewNodeHandler(database *db.DB, tokenGen TokenGenerator, agents *agent.Client) *NodeHandler {
 	return &NodeHandler{db: database, tokenGen: tokenGen, agents: agents}
+}
+
+// SetUseTLS configures the handler to generate https:// agent URLs.
+func (h *NodeHandler) SetUseTLS(useTLS bool) {
+	h.useTLS = useTLS
 }
 
 // List handles GET /api/nodes.
@@ -119,7 +125,11 @@ func (h *NodeHandler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Register the agent URL so the control plane can push peers to it.
-	agentURL := fmt.Sprintf("http://%s:8081", node.IP)
+	scheme := "http"
+	if h.useTLS {
+		scheme = "https"
+	}
+	agentURL := fmt.Sprintf("%s://%s:8081", scheme, node.IP)
 	h.agents.RegisterNode(node.ID, agentURL, agentToken)
 
 	httputil.WriteJSON(w, http.StatusCreated, map[string]any{
@@ -164,6 +174,30 @@ func (h *NodeHandler) ReportBandwidth(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, http.StatusOK, map[string]any{
 		"accepted": len(report.Peers),
 	})
+}
+
+// GetSecurity handles GET /api/nodes/{id}/security.
+func (h *NodeHandler) GetSecurity(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	node, err := h.db.GetNode(id)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	if node == nil {
+		httputil.WriteError(w, http.StatusNotFound, "node not found")
+		return
+	}
+
+	status, err := h.agents.GetSecurity(id)
+	if err != nil {
+		log.Printf("Failed to get security status for node %s: %v", id, err)
+		httputil.WriteError(w, http.StatusBadGateway, "failed to reach node agent")
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, status)
 }
 
 // GetBandwidth handles GET /api/nodes/{id}/bandwidth.

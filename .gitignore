@@ -29,6 +29,7 @@ override.tf.json
 *.pem
 *.conf
 !*.conf.tmpl
+certs/
 
 # IDE
 .idea/

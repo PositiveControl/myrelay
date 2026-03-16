@@ -170,6 +170,9 @@ func (s *Server) validateOnboardingToken(token string) (*db.OnboardingToken, *mo
 	if time.Now().UTC().After(tok.ExpiresAt) {
 		return nil, nil, "This onboarding link has expired. Please contact your administrator for a new one."
 	}
+	if tok.Used {
+		return nil, nil, "This onboarding link has already been used. Please contact your administrator for a new one."
+	}
 
 	user, err := s.db.GetUser(tok.UserID)
 	if err != nil || user == nil {

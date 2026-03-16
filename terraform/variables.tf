@@ -27,3 +27,15 @@ variable "image" {
   type        = string
   default     = "ubuntu-24.04"
 }
+
+variable "admin_cidrs" {
+  description = "CIDRs allowed to access the API on port 8080"
+  type        = list(string)
+  default     = ["184.179.194.223/32"]
+}
+
+variable "agent_source_cidrs" {
+  description = "CIDRs allowed to access the agent API on port 8081 (VPN node IPs + API server IP)"
+  type        = list(string)
+  default     = ["5.78.83.247/32", "5.223.70.143/32"]
+}

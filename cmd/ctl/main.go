@@ -92,6 +92,12 @@ func main() {
 		default:
 			cmdUsersGet(args[0])
 		}
+	case "security":
+		if len(args) == 0 {
+			cmdSecurityAll()
+		} else {
+			cmdSecurityNode(args[0])
+		}
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -121,6 +127,8 @@ Commands:
   users rules <id> rm    Remove a bypass rule
   users config <id>      Regenerate WireGuard client config
   users regen <id>       Regenerate config + new onboarding link
+  security               Show security status for all nodes
+  security <node_id>     Show security status for a specific node
 
 Environment:
   VPN_API_URL            API base URL (default: http://localhost:8080)
@@ -593,6 +601,76 @@ func requireArg(args []string, idx int, name string) {
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 	os.Exit(1)
+}
+
+// --- Security ---
+
+func cmdSecurityAll() {
+	data := apiGet("/api/nodes")
+	var nodes []map[string]any
+	json.Unmarshal(data, &nodes)
+
+	for _, n := range nodes {
+		nodeID := n["id"].(string)
+		fmt.Printf("=== %s (%s) ===\n", nodeID, n["ip"])
+		cmdSecurityNode(nodeID)
+		fmt.Println()
+	}
+}
+
+func cmdSecurityNode(nodeID string) {
+	data := apiGetMaybe("/api/nodes/" + nodeID + "/security")
+	if data == nil {
+		fmt.Println("  Could not retrieve security status")
+		return
+	}
+
+	var s map[string]any
+	json.Unmarshal(data, &s)
+
+	check := func(ok bool) string {
+		if ok {
+			return "OK"
+		}
+		return "FAIL"
+	}
+
+	// TLS
+	if tls, ok := s["tls"].(map[string]any); ok {
+		enabled, _ := tls["enabled"].(bool)
+		fmt.Printf("  TLS:                %s\n", check(enabled))
+	}
+
+	// Fail2Ban
+	if f2b, ok := s["fail2ban"].(map[string]any); ok {
+		active, _ := f2b["active"].(bool)
+		banned := int(f2b["currently_banned"].(float64))
+		totalBanned := int(f2b["total_banned"].(float64))
+		fmt.Printf("  Fail2Ban:           %s  (banned: %d, total: %d)\n", check(active), banned, totalBanned)
+	}
+
+	// SSH
+	if ssh, ok := s["ssh"].(map[string]any); ok {
+		rootHardened, _ := ssh["root_login_hardened"].(bool)
+		pwDisabled, _ := ssh["password_auth_disabled"].(bool)
+		maxAuth := int(ssh["max_auth_tries"].(float64))
+		fmt.Printf("  SSH Root Login:     %s  (%s)\n", check(rootHardened), ssh["permit_root_login"])
+		fmt.Printf("  SSH Password Auth:  %s\n", check(pwDisabled))
+		fmt.Printf("  SSH Max Auth Tries: %d\n", maxAuth)
+	}
+
+	// Unattended Upgrades
+	if uu, ok := s["unattended_upgrades"].(map[string]any); ok {
+		active, _ := uu["active"].(bool)
+		fmt.Printf("  Auto Updates:       %s\n", check(active))
+	}
+
+	// Firewall
+	if fw, ok := s["firewall"].(map[string]any); ok {
+		active, _ := fw["active"].(bool)
+		rules, _ := fw["rules"].([]any)
+		fmt.Printf("  Firewall:           %s  (%d rules)\n", check(active), len(rules))
+	}
 }
 
 func envOrDefault(key, fallback string) string {
