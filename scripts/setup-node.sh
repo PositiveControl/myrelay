@@ -49,6 +49,7 @@ ufw default deny incoming
 ufw default allow outgoing
 ufw allow 22/tcp comment "SSH"
 ufw allow 51820/udp comment "WireGuard"
+ufw allow 8081/tcp comment "VPN Agent API"
 ufw --force enable
 
 # Create a directory for the agent binary.

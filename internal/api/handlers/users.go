@@ -5,9 +5,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 
+	"github.com/m7s/vpn/internal/agent"
 	"github.com/m7s/vpn/internal/httputil"
 	"github.com/m7s/vpn/internal/models"
 	"github.com/m7s/vpn/internal/wireguard"
@@ -15,22 +17,23 @@ import (
 
 // UserHandler handles HTTP requests for user management.
 type UserHandler struct {
-	mu    sync.RWMutex
-	users map[string]*models.User
-	nodes map[string]*models.Node
-	nextIP uint32 // simple IP counter for 10.0.0.x
+	mu      sync.RWMutex
+	users   map[string]*models.User
+	nodes   map[string]*models.Node
+	agents  *agent.Client
+	nextIP  uint32
 }
 
 // NewUserHandler creates a handler backed by the given user and node maps.
-func NewUserHandler(users map[string]*models.User, nodes map[string]*models.Node) *UserHandler {
-	return &UserHandler{users: users, nodes: nodes, nextIP: 2} // start at 10.0.0.2
+func NewUserHandler(users map[string]*models.User, nodes map[string]*models.Node, agents *agent.Client) *UserHandler {
+	return &UserHandler{users: users, nodes: nodes, agents: agents, nextIP: 2}
 }
 
 // createUserRequest is the JSON body for creating a new user.
 type createUserRequest struct {
 	Email  string      `json:"email"`
 	Plan   models.Plan `json:"plan"`
-	NodeID string      `json:"node_id"` // optional: assign to specific node
+	NodeID string      `json:"node_id"`
 }
 
 // Create handles POST /api/users.
@@ -82,6 +85,13 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 	ip := fmt.Sprintf("10.0.0.%d", h.nextIP)
 	h.nextIP++
 	user.Address = ip + "/32"
+
+	// Push peer to the node's WireGuard interface via the agent.
+	if err := h.agents.AddPeer(node.ID, keys.PublicKey, user.Address); err != nil {
+		log.Printf("Failed to push peer to node %s: %v", node.ID, err)
+		httputil.WriteError(w, http.StatusBadGateway, "failed to configure VPN node: "+err.Error())
+		return
+	}
 
 	h.mu.Lock()
 	h.users[user.ID] = user
@@ -140,20 +150,31 @@ func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	h.mu.Lock()
-	_, ok := h.users[id]
+	user, ok := h.users[id]
 	if !ok {
 		h.mu.Unlock()
 		httputil.WriteError(w, http.StatusNotFound, "user not found")
 		return
 	}
+
+	nodeID := user.AssignedNodeID
+	publicKey := user.PublicKey
 	delete(h.users, id)
+
+	if node, ok := h.nodes[nodeID]; ok && node.CurrentPeers > 0 {
+		node.CurrentPeers--
+	}
 	h.mu.Unlock()
+
+	// Remove peer from the node.
+	if err := h.agents.RemovePeer(nodeID, publicKey); err != nil {
+		log.Printf("Failed to remove peer from node %s: %v", nodeID, err)
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // assignNode picks the best available node for a new user.
-// If nodeID is specified, uses that node. Otherwise picks the node with most capacity.
 func (h *UserHandler) assignNode(nodeID string) *models.Node {
 	if nodeID != "" {
 		if node, ok := h.nodes[nodeID]; ok && node.HasCapacity() {

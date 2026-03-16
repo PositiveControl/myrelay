@@ -126,6 +126,52 @@ func ParseWgShow(output string) ([]PeerTransfer, error) {
 	return peers, nil
 }
 
+// PeerInfo holds summary info about a configured peer.
+type PeerInfo struct {
+	PublicKey  string `json:"public_key"`
+	AllowedIPs string `json:"allowed_ips"`
+	Endpoint   string `json:"endpoint,omitempty"`
+	LastHandshake string `json:"last_handshake,omitempty"`
+}
+
+// ShowPeers returns info about all configured peers on an interface by parsing `wg show`.
+func ShowPeers(interfaceName string) ([]PeerInfo, error) {
+	cmd := exec.Command("wg", "show", interfaceName, "dump")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("wg show %s dump: %w", interfaceName, err)
+	}
+
+	var peers []PeerInfo
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	first := true
+	for scanner.Scan() {
+		if first {
+			first = false // skip the interface line
+			continue
+		}
+		fields := strings.Split(scanner.Text(), "\t")
+		if len(fields) < 4 {
+			continue
+		}
+		p := PeerInfo{
+			PublicKey:  fields[0],
+			AllowedIPs: fields[3],
+		}
+		if fields[2] != "(none)" {
+			p.Endpoint = fields[2]
+		}
+		if len(fields) > 4 && fields[4] != "0" {
+			p.LastHandshake = fields[4]
+		}
+		peers = append(peers, p)
+	}
+	if peers == nil {
+		peers = []PeerInfo{}
+	}
+	return peers, scanner.Err()
+}
+
 // ApplyConfig writes a WireGuard configuration and brings the interface up
 // using wg-quick.
 func ApplyConfig(interfaceName, configPath string) error {

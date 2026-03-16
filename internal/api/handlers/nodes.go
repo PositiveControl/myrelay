@@ -2,9 +2,11 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 
+	"github.com/m7s/vpn/internal/agent"
 	"github.com/m7s/vpn/internal/bandwidth"
 	"github.com/m7s/vpn/internal/httputil"
 	"github.com/m7s/vpn/internal/models"
@@ -21,11 +23,12 @@ type NodeHandler struct {
 	nodes         map[string]*models.Node
 	bandwidthData map[string][]bandwidth.PeerBandwidth
 	tokenGen      TokenGenerator
+	agents        *agent.Client
 }
 
 // NewNodeHandler creates a handler backed by the given node map.
-func NewNodeHandler(nodes map[string]*models.Node, tokenGen TokenGenerator) *NodeHandler {
-	return &NodeHandler{nodes: nodes, tokenGen: tokenGen}
+func NewNodeHandler(nodes map[string]*models.Node, tokenGen TokenGenerator, agents *agent.Client) *NodeHandler {
+	return &NodeHandler{nodes: nodes, tokenGen: tokenGen, agents: agents}
 }
 
 // List handles GET /api/nodes.
@@ -103,6 +106,10 @@ func (h *NodeHandler) Register(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, http.StatusInternalServerError, "failed to generate node token")
 		return
 	}
+
+	// Register the agent URL so the control plane can push peers to it.
+	agentURL := fmt.Sprintf("http://%s:8081", node.IP)
+	h.agents.RegisterNode(node.ID, agentURL, agentToken)
 
 	h.mu.Lock()
 	h.nodes[node.ID] = &node

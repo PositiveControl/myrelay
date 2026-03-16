@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/m7s/vpn/internal/agent"
 	"github.com/m7s/vpn/internal/api/handlers"
 	"github.com/m7s/vpn/internal/httputil"
 	"github.com/m7s/vpn/internal/models"
@@ -29,6 +30,7 @@ type Server struct {
 	addr   string
 	store  *Store
 	auth   *Auth
+	agents *agent.Client
 	mux    *http.ServeMux
 	server *http.Server
 }
@@ -36,10 +38,11 @@ type Server struct {
 // NewServer creates a configured API server.
 func NewServer(addr string, store *Store, auth *Auth) *Server {
 	s := &Server{
-		addr:  addr,
-		store: store,
-		auth:  auth,
-		mux:   http.NewServeMux(),
+		addr:   addr,
+		store:  store,
+		auth:   auth,
+		agents: agent.NewClient(),
+		mux:    http.NewServeMux(),
 	}
 	s.registerRoutes()
 	s.server = &http.Server{
@@ -60,8 +63,8 @@ func (s *Server) Start() error {
 
 // registerRoutes wires up all API endpoints.
 func (s *Server) registerRoutes() {
-	userHandler := handlers.NewUserHandler(s.store.Users, s.store.Nodes)
-	nodeHandler := handlers.NewNodeHandler(s.store.Nodes, s.auth)
+	userHandler := handlers.NewUserHandler(s.store.Users, s.store.Nodes, s.agents)
+	nodeHandler := handlers.NewNodeHandler(s.store.Nodes, s.auth, s.agents)
 
 	// Public.
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
