@@ -6,11 +6,13 @@ import (
 	"os"
 
 	"github.com/m7s/vpn/internal/api"
+	"github.com/m7s/vpn/internal/db"
 )
 
 func main() {
 	addr := flag.String("addr", envOrDefault("LISTEN_ADDR", ":8080"), "HTTP listen address")
 	adminToken := flag.String("admin-token", envOrDefault("ADMIN_TOKEN", ""), "Admin API token")
+	dbPath := flag.String("db", envOrDefault("DB_PATH", "vpn.db"), "SQLite database path")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -24,11 +26,16 @@ func main() {
 		log.Printf("No ADMIN_TOKEN set — generated one: %s", *adminToken)
 	}
 
-	log.Printf("Starting VPN control plane API")
+	database, err := db.Open(*dbPath)
+	if err != nil {
+		log.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
 
-	auth := api.NewAuth(*adminToken)
-	store := api.NewStore()
-	srv := api.NewServer(*addr, store, auth)
+	log.Printf("Starting VPN control plane API (db: %s)", *dbPath)
+
+	auth := api.NewAuth(*adminToken, database)
+	srv := api.NewServer(*addr, database, auth)
 
 	if err := srv.Start(); err != nil {
 		log.Fatalf("server error: %v", err)

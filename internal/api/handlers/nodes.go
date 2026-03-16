@@ -3,11 +3,13 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 
 	"github.com/m7s/vpn/internal/agent"
 	"github.com/m7s/vpn/internal/bandwidth"
+	"github.com/m7s/vpn/internal/db"
 	"github.com/m7s/vpn/internal/httputil"
 	"github.com/m7s/vpn/internal/models"
 )
@@ -19,26 +21,28 @@ type TokenGenerator interface {
 
 // NodeHandler handles HTTP requests for VPN node management.
 type NodeHandler struct {
+	db       *db.DB
+	tokenGen TokenGenerator
+	agents   *agent.Client
+
 	mu            sync.RWMutex
-	nodes         map[string]*models.Node
-	bandwidthData map[string][]bandwidth.PeerBandwidth
-	tokenGen      TokenGenerator
-	agents        *agent.Client
+	bandwidthData map[string][]bandwidth.PeerBandwidth // still in-memory, not critical to persist
 }
 
-// NewNodeHandler creates a handler backed by the given node map.
-func NewNodeHandler(nodes map[string]*models.Node, tokenGen TokenGenerator, agents *agent.Client) *NodeHandler {
-	return &NodeHandler{nodes: nodes, tokenGen: tokenGen, agents: agents}
+// NewNodeHandler creates a handler backed by the database.
+func NewNodeHandler(database *db.DB, tokenGen TokenGenerator, agents *agent.Client) *NodeHandler {
+	return &NodeHandler{db: database, tokenGen: tokenGen, agents: agents}
 }
 
 // List handles GET /api/nodes.
 func (h *NodeHandler) List(w http.ResponseWriter, r *http.Request) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-
-	nodes := make([]*models.Node, 0, len(h.nodes))
-	for _, n := range h.nodes {
-		nodes = append(nodes, n)
+	nodes, err := h.db.ListNodes()
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to list nodes")
+		return
+	}
+	if nodes == nil {
+		nodes = []*models.Node{}
 	}
 	httputil.WriteJSON(w, http.StatusOK, nodes)
 }
@@ -46,12 +50,12 @@ func (h *NodeHandler) List(w http.ResponseWriter, r *http.Request) {
 // Get handles GET /api/nodes/{id}.
 func (h *NodeHandler) Get(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-
-	h.mu.RLock()
-	node, ok := h.nodes[id]
-	h.mu.RUnlock()
-
-	if !ok {
+	node, err := h.db.GetNode(id)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	if node == nil {
 		httputil.WriteError(w, http.StatusNotFound, "node not found")
 		return
 	}
@@ -61,21 +65,19 @@ func (h *NodeHandler) Get(w http.ResponseWriter, r *http.Request) {
 // Sync handles POST /api/nodes/{id}/sync.
 func (h *NodeHandler) Sync(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-
-	h.mu.RLock()
-	node, ok := h.nodes[id]
-	h.mu.RUnlock()
-
-	if !ok {
+	node, err := h.db.GetNode(id)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	if node == nil {
 		httputil.WriteError(w, http.StatusNotFound, "node not found")
 		return
 	}
-
 	if node.Status != models.NodeStatusActive {
 		httputil.WriteError(w, http.StatusConflict, "node is not active")
 		return
 	}
-
 	httputil.WriteJSON(w, http.StatusOK, map[string]any{
 		"node":   node,
 		"synced": true,
@@ -107,13 +109,18 @@ func (h *NodeHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Save node and token to database.
+	if err := h.db.CreateNode(&node); err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to save node: "+err.Error())
+		return
+	}
+	if err := h.db.SaveNodeToken(node.ID, agentToken); err != nil {
+		log.Printf("Failed to save node token: %v", err)
+	}
+
 	// Register the agent URL so the control plane can push peers to it.
 	agentURL := fmt.Sprintf("http://%s:8081", node.IP)
 	h.agents.RegisterNode(node.ID, agentURL, agentToken)
-
-	h.mu.Lock()
-	h.nodes[node.ID] = &node
-	h.mu.Unlock()
 
 	httputil.WriteJSON(w, http.StatusCreated, map[string]any{
 		"node":        node,
@@ -131,11 +138,12 @@ type bandwidthReport struct {
 func (h *NodeHandler) ReportBandwidth(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	h.mu.RLock()
-	_, ok := h.nodes[id]
-	h.mu.RUnlock()
-
-	if !ok {
+	node, err := h.db.GetNode(id)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	if node == nil {
 		httputil.WriteError(w, http.StatusNotFound, "node not found")
 		return
 	}

@@ -6,24 +6,22 @@ import (
 	"encoding/hex"
 	"net/http"
 	"strings"
-	"sync"
 
+	"github.com/m7s/vpn/internal/db"
 	"github.com/m7s/vpn/internal/httputil"
 )
 
 // Auth handles API authentication with admin and per-node tokens.
 type Auth struct {
 	adminToken string
-
-	mu         sync.RWMutex
-	nodeTokens map[string]string // node ID -> token
+	db         *db.DB
 }
 
-// NewAuth creates an Auth with the given admin token.
-func NewAuth(adminToken string) *Auth {
+// NewAuth creates an Auth with the given admin token and database.
+func NewAuth(adminToken string, database *db.DB) *Auth {
 	return &Auth{
 		adminToken: adminToken,
-		nodeTokens: make(map[string]string),
+		db:         database,
 	}
 }
 
@@ -33,17 +31,8 @@ func (a *Auth) GenerateNodeToken(nodeID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	a.mu.Lock()
-	a.nodeTokens[nodeID] = token
-	a.mu.Unlock()
+	// Token is saved to DB by the node handler after node creation.
 	return token, nil
-}
-
-// RevokeNodeToken removes a node's token.
-func (a *Auth) RevokeNodeToken(nodeID string) {
-	a.mu.Lock()
-	delete(a.nodeTokens, nodeID)
-	a.mu.Unlock()
 }
 
 // RequireAdmin returns middleware that requires a valid admin token.
@@ -70,13 +59,10 @@ func (a *Auth) RequireNodeOrAdmin(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// Check node token.
+		// Check node token from database.
 		nodeID := r.PathValue("id")
-		a.mu.RLock()
-		expected, ok := a.nodeTokens[nodeID]
-		a.mu.RUnlock()
-
-		if ok && secureCompare(token, expected) {
+		expected, err := a.db.GetNodeToken(nodeID)
+		if err == nil && expected != "" && secureCompare(token, expected) {
 			next(w, r)
 			return
 		}

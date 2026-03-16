@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"sync"
 
 	"github.com/m7s/vpn/internal/agent"
+	"github.com/m7s/vpn/internal/db"
 	"github.com/m7s/vpn/internal/httputil"
 	"github.com/m7s/vpn/internal/models"
 	"github.com/m7s/vpn/internal/wireguard"
@@ -17,16 +17,13 @@ import (
 
 // UserHandler handles HTTP requests for user management.
 type UserHandler struct {
-	mu      sync.RWMutex
-	users   map[string]*models.User
-	nodes   map[string]*models.Node
-	agents  *agent.Client
-	nextIP  uint32
+	db     *db.DB
+	agents *agent.Client
 }
 
-// NewUserHandler creates a handler backed by the given user and node maps.
-func NewUserHandler(users map[string]*models.User, nodes map[string]*models.Node, agents *agent.Client) *UserHandler {
-	return &UserHandler{users: users, nodes: nodes, agents: agents, nextIP: 2}
+// NewUserHandler creates a handler backed by the database.
+func NewUserHandler(database *db.DB, agents *agent.Client) *UserHandler {
+	return &UserHandler{db: database, agents: agents}
 }
 
 // createUserRequest is the JSON body for creating a new user.
@@ -74,16 +71,24 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 	user.PrivateKey = keys.PrivateKey
 
 	// Assign to a node.
-	node := h.assignNode(req.NodeID)
+	node, err := h.assignNode(req.NodeID)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to query nodes")
+		return
+	}
 	if node == nil {
 		httputil.WriteError(w, http.StatusServiceUnavailable, "no available nodes")
 		return
 	}
 	user.AssignedNodeID = node.ID
 
-	// Assign an IP address in the 10.0.0.x range.
-	ip := fmt.Sprintf("10.0.0.%d", h.nextIP)
-	h.nextIP++
+	// Assign an IP address.
+	nextIP, err := h.db.NextIP()
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to allocate IP")
+		return
+	}
+	ip := fmt.Sprintf("10.0.0.%d", nextIP)
 	user.Address = ip + "/32"
 
 	// Push peer to the node's WireGuard interface via the agent.
@@ -93,10 +98,14 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.mu.Lock()
-	h.users[user.ID] = user
-	node.CurrentPeers++
-	h.mu.Unlock()
+	// Save to database.
+	if err := h.db.CreateUser(user); err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to save user")
+		return
+	}
+	if err := h.db.IncrementNodePeers(node.ID); err != nil {
+		log.Printf("Failed to increment peer count for node %s: %v", node.ID, err)
+	}
 
 	// Generate client config.
 	clientConfig, err := wireguard.GeneratePeerConfig(wireguard.PeerConfig{
@@ -120,12 +129,13 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 // List handles GET /api/users.
 func (h *UserHandler) List(w http.ResponseWriter, r *http.Request) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-
-	users := make([]*models.User, 0, len(h.users))
-	for _, u := range h.users {
-		users = append(users, u)
+	users, err := h.db.ListUsers()
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to list users")
+		return
+	}
+	if users == nil {
+		users = []*models.User{}
 	}
 	httputil.WriteJSON(w, http.StatusOK, users)
 }
@@ -133,12 +143,12 @@ func (h *UserHandler) List(w http.ResponseWriter, r *http.Request) {
 // Get handles GET /api/users/{id}.
 func (h *UserHandler) Get(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-
-	h.mu.RLock()
-	user, ok := h.users[id]
-	h.mu.RUnlock()
-
-	if !ok {
+	user, err := h.db.GetUser(id)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	if user == nil {
 		httputil.WriteError(w, http.StatusNotFound, "user not found")
 		return
 	}
@@ -149,41 +159,47 @@ func (h *UserHandler) Get(w http.ResponseWriter, r *http.Request) {
 func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	h.mu.Lock()
-	user, ok := h.users[id]
-	if !ok {
-		h.mu.Unlock()
+	user, err := h.db.DeleteUser(id)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	if user == nil {
 		httputil.WriteError(w, http.StatusNotFound, "user not found")
 		return
 	}
 
-	nodeID := user.AssignedNodeID
-	publicKey := user.PublicKey
-	delete(h.users, id)
-
-	if node, ok := h.nodes[nodeID]; ok && node.CurrentPeers > 0 {
-		node.CurrentPeers--
+	if err := h.db.DecrementNodePeers(user.AssignedNodeID); err != nil {
+		log.Printf("Failed to decrement peer count for node %s: %v", user.AssignedNodeID, err)
 	}
-	h.mu.Unlock()
 
 	// Remove peer from the node.
-	if err := h.agents.RemovePeer(nodeID, publicKey); err != nil {
-		log.Printf("Failed to remove peer from node %s: %v", nodeID, err)
+	if err := h.agents.RemovePeer(user.AssignedNodeID, user.PublicKey); err != nil {
+		log.Printf("Failed to remove peer from node %s: %v", user.AssignedNodeID, err)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// assignNode picks the best available node for a new user.
-func (h *UserHandler) assignNode(nodeID string) *models.Node {
+// assignNode picks the best available node.
+func (h *UserHandler) assignNode(nodeID string) (*models.Node, error) {
 	if nodeID != "" {
-		if node, ok := h.nodes[nodeID]; ok && node.HasCapacity() {
-			return node
+		node, err := h.db.GetNode(nodeID)
+		if err != nil {
+			return nil, err
 		}
-		return nil
+		if node != nil && node.HasCapacity() {
+			return node, nil
+		}
+		return nil, nil
+	}
+
+	nodes, err := h.db.ListNodes()
+	if err != nil {
+		return nil, err
 	}
 	var best *models.Node
-	for _, n := range h.nodes {
+	for _, n := range nodes {
 		if !n.HasCapacity() {
 			continue
 		}
@@ -191,7 +207,7 @@ func (h *UserHandler) assignNode(nodeID string) *models.Node {
 			best = n
 		}
 	}
-	return best
+	return best, nil
 }
 
 func generateID() (string, error) {

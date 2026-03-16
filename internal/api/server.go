@@ -1,34 +1,21 @@
 package api
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"time"
 
 	"github.com/m7s/vpn/internal/agent"
 	"github.com/m7s/vpn/internal/api/handlers"
+	"github.com/m7s/vpn/internal/db"
 	"github.com/m7s/vpn/internal/httputil"
-	"github.com/m7s/vpn/internal/models"
 )
-
-// Store is a simple in-memory data store. Replace with a real database later.
-type Store struct {
-	Users map[string]*models.User
-	Nodes map[string]*models.Node
-}
-
-// NewStore creates an empty in-memory store.
-func NewStore() *Store {
-	return &Store{
-		Users: make(map[string]*models.User),
-		Nodes: make(map[string]*models.Node),
-	}
-}
 
 // Server is the control plane HTTP API server.
 type Server struct {
 	addr   string
-	store  *Store
+	db     *db.DB
 	auth   *Auth
 	agents *agent.Client
 	mux    *http.ServeMux
@@ -36,14 +23,20 @@ type Server struct {
 }
 
 // NewServer creates a configured API server.
-func NewServer(addr string, store *Store, auth *Auth) *Server {
+func NewServer(addr string, database *db.DB, auth *Auth) *Server {
 	s := &Server{
 		addr:   addr,
-		store:  store,
+		db:     database,
 		auth:   auth,
 		agents: agent.NewClient(),
 		mux:    http.NewServeMux(),
 	}
+
+	// Restore agent registrations from the database.
+	if err := s.restoreAgents(); err != nil {
+		log.Printf("Warning: failed to restore agent registrations: %v", err)
+	}
+
 	s.registerRoutes()
 	s.server = &http.Server{
 		Addr:         addr,
@@ -55,6 +48,25 @@ func NewServer(addr string, store *Store, auth *Auth) *Server {
 	return s
 }
 
+// restoreAgents re-registers agent URLs from persisted node data.
+func (s *Server) restoreAgents() error {
+	nodes, err := s.db.ListNodes()
+	if err != nil {
+		return err
+	}
+	tokens, err := s.db.ListNodeTokens()
+	if err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		agentURL := fmt.Sprintf("http://%s:8081", node.IP)
+		token := tokens[node.ID]
+		s.agents.RegisterNode(node.ID, agentURL, token)
+		log.Printf("Restored agent registration for node %s (%s)", node.ID, node.IP)
+	}
+	return nil
+}
+
 // Start begins listening for HTTP requests. Blocks until the server stops.
 func (s *Server) Start() error {
 	log.Printf("API server listening on %s", s.addr)
@@ -63,8 +75,8 @@ func (s *Server) Start() error {
 
 // registerRoutes wires up all API endpoints.
 func (s *Server) registerRoutes() {
-	userHandler := handlers.NewUserHandler(s.store.Users, s.store.Nodes, s.agents)
-	nodeHandler := handlers.NewNodeHandler(s.store.Nodes, s.auth, s.agents)
+	userHandler := handlers.NewUserHandler(s.db, s.agents)
+	nodeHandler := handlers.NewNodeHandler(s.db, s.auth, s.agents)
 
 	// Public.
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
