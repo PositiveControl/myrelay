@@ -95,6 +95,11 @@ func (s *Server) registerRoutes() {
 
 	// Node or admin.
 	s.mux.HandleFunc("POST /api/nodes/{id}/bandwidth", s.auth.RequireNodeOrAdmin(nodeHandler.ReportBandwidth))
+
+	// Public onboarding pages (no auth required).
+	s.mux.HandleFunc("GET /onboard/{token}", s.handleOnboardPage)
+	s.mux.HandleFunc("GET /onboard/{token}/config", s.handleOnboardConfig)
+	s.mux.HandleFunc("GET /onboard/{token}/qr", s.handleOnboardQR)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

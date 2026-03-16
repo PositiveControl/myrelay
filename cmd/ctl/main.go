@@ -320,6 +320,11 @@ func cmdUsersCreate(args []string) {
 		fmt.Printf("Bandwidth:    %s\n", humanBytes(int64(user["bandwidth_limit"].(float64))))
 	}
 
+	if onboardURL, ok := result["onboarding_url"].(string); ok {
+		fmt.Printf("\nOnboarding URL: %s%s\n", apiURL, onboardURL)
+		fmt.Println("Send this link to the user to set up their VPN.")
+	}
+
 	if config, ok := result["client_config"].(string); ok {
 		fmt.Println("\n--- Client Config ---")
 		fmt.Println(config)
