@@ -28,15 +28,17 @@ func NewStore() *Store {
 type Server struct {
 	addr   string
 	store  *Store
+	auth   *Auth
 	mux    *http.ServeMux
 	server *http.Server
 }
 
 // NewServer creates a configured API server.
-func NewServer(addr string, store *Store) *Server {
+func NewServer(addr string, store *Store, auth *Auth) *Server {
 	s := &Server{
 		addr:  addr,
 		store: store,
+		auth:  auth,
 		mux:   http.NewServeMux(),
 	}
 	s.registerRoutes()
@@ -58,19 +60,26 @@ func (s *Server) Start() error {
 
 // registerRoutes wires up all API endpoints.
 func (s *Server) registerRoutes() {
-	userHandler := handlers.NewUserHandler(s.store.Users)
-	nodeHandler := handlers.NewNodeHandler(s.store.Nodes)
+	userHandler := handlers.NewUserHandler(s.store.Users, s.store.Nodes)
+	nodeHandler := handlers.NewNodeHandler(s.store.Nodes, s.auth)
 
+	// Public.
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
 
-	s.mux.HandleFunc("POST /api/users", userHandler.Create)
-	s.mux.HandleFunc("GET /api/users", userHandler.List)
-	s.mux.HandleFunc("GET /api/users/{id}", userHandler.Get)
-	s.mux.HandleFunc("DELETE /api/users/{id}", userHandler.Delete)
+	// Admin-only.
+	s.mux.HandleFunc("POST /api/users", s.auth.RequireAdmin(userHandler.Create))
+	s.mux.HandleFunc("GET /api/users", s.auth.RequireAdmin(userHandler.List))
+	s.mux.HandleFunc("GET /api/users/{id}", s.auth.RequireAdmin(userHandler.Get))
+	s.mux.HandleFunc("DELETE /api/users/{id}", s.auth.RequireAdmin(userHandler.Delete))
 
-	s.mux.HandleFunc("GET /api/nodes", nodeHandler.List)
-	s.mux.HandleFunc("GET /api/nodes/{id}", nodeHandler.Get)
-	s.mux.HandleFunc("POST /api/nodes/{id}/sync", nodeHandler.Sync)
+	s.mux.HandleFunc("POST /api/nodes", s.auth.RequireAdmin(nodeHandler.Register))
+	s.mux.HandleFunc("GET /api/nodes", s.auth.RequireAdmin(nodeHandler.List))
+	s.mux.HandleFunc("GET /api/nodes/{id}", s.auth.RequireAdmin(nodeHandler.Get))
+	s.mux.HandleFunc("POST /api/nodes/{id}/sync", s.auth.RequireAdmin(nodeHandler.Sync))
+	s.mux.HandleFunc("GET /api/nodes/{id}/bandwidth", s.auth.RequireAdmin(nodeHandler.GetBandwidth))
+
+	// Node or admin.
+	s.mux.HandleFunc("POST /api/nodes/{id}/bandwidth", s.auth.RequireNodeOrAdmin(nodeHandler.ReportBandwidth))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

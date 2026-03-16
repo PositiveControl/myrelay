@@ -4,22 +4,17 @@ variable "hcloud_token" {
   sensitive   = true
 }
 
-variable "node_count" {
-  description = "Number of WireGuard VPN nodes to create"
-  type        = number
-  default     = 2
-}
-
-variable "server_type" {
-  description = "Hetzner server type for VPN nodes"
-  type        = string
-  default     = "cx22"
-}
-
-variable "location" {
-  description = "Hetzner datacenter location"
-  type        = string
-  default     = "nbg1"
+variable "nodes" {
+  description = "Map of VPN nodes to create. Key is the node name."
+  type = map(object({
+    location    = string
+    server_type = optional(string, "cpx12")
+  }))
+  default = {
+    "vpn-us-west" = { location = "hil", server_type = "cpx11" }
+    "vpn-eu-fin"  = { location = "hel1", server_type = "cpx11" }
+    "vpn-ap-sgp"  = { location = "sin", server_type = "cpx12" }
+  }
 }
 
 variable "ssh_key_name" {
@@ -30,11 +25,5 @@ variable "ssh_key_name" {
 variable "image" {
   description = "OS image for VPN nodes"
   type        = string
-  default     = "ubuntu-22.04"
-}
-
-variable "node_name_prefix" {
-  description = "Prefix for VPN node hostnames"
-  type        = string
-  default     = "vpn"
+  default     = "ubuntu-24.04"
 }

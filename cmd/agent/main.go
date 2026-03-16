@@ -18,6 +18,7 @@ func main() {
 	apiURL := flag.String("api", envOrDefault("API_URL", "http://localhost:8080"), "Control plane API base URL")
 	iface := flag.String("interface", envOrDefault("WG_INTERFACE", "wg0"), "WireGuard interface name")
 	nodeID := flag.String("node-id", envOrDefault("NODE_ID", ""), "This node's ID in the control plane")
+	agentToken := flag.String("token", envOrDefault("AGENT_TOKEN", ""), "Agent authentication token")
 	pollInterval := flag.Duration("poll", 30*time.Second, "Bandwidth poll interval")
 	reportInterval := flag.Duration("report", 60*time.Second, "Report interval to control plane")
 	flag.Parse()
@@ -53,7 +54,7 @@ func main() {
 			if len(peers) == 0 {
 				continue
 			}
-			if err := reportBandwidth(*apiURL, *nodeID, peers); err != nil {
+			if err := reportBandwidth(*apiURL, *nodeID, *agentToken, peers); err != nil {
 				log.Printf("Failed to report bandwidth: %v", err)
 			} else {
 				log.Printf("Reported bandwidth for %d peers", len(peers))
@@ -66,7 +67,7 @@ func main() {
 	}
 }
 
-func reportBandwidth(apiURL, nodeID string, peers []bandwidth.PeerBandwidth) error {
+func reportBandwidth(apiURL, nodeID, token string, peers []bandwidth.PeerBandwidth) error {
 	payload := map[string]any{
 		"node_id": nodeID,
 		"peers":   peers,
@@ -83,6 +84,9 @@ func reportBandwidth(apiURL, nodeID string, peers []bandwidth.PeerBandwidth) err
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)

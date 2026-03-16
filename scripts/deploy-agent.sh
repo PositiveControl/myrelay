@@ -22,7 +22,7 @@ if [ $# -gt 0 ]; then
 else
     echo "Fetching node IPs from Terraform..."
     cd "${PROJECT_DIR}/terraform"
-    NODE_IPS=($(terraform output -json node_ips | jq -r '.[]'))
+    NODE_IPS=($(terraform output -json nodes | jq -r '.[].ip'))
 fi
 
 if [ ${#NODE_IPS[@]} -eq 0 ]; then

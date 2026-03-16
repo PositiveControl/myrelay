@@ -1,9 +1,11 @@
 # Copy this file to terraform.tfvars and fill in your values.
 
-hcloud_token     = "your-hetzner-api-token"
-ssh_key_name     = "my-ssh-key"
-node_count       = 2
-server_type      = "cx22"
-location         = "nbg1"
-image            = "ubuntu-22.04"
-node_name_prefix = "vpn"
+hcloud_token = "your-hetzner-api-token"
+ssh_key_name = "my-ssh-key"
+
+# Default nodes — override to add/remove/change locations
+nodes = {
+  "vpn-us-west" = { location = "hil" }
+  "vpn-eu-fin"  = { location = "hel1" }
+  "vpn-ap-sgp"  = { location = "sin" }
+}

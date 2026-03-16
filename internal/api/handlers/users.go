@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 
@@ -16,17 +17,20 @@ import (
 type UserHandler struct {
 	mu    sync.RWMutex
 	users map[string]*models.User
+	nodes map[string]*models.Node
+	nextIP uint32 // simple IP counter for 10.0.0.x
 }
 
-// NewUserHandler creates a handler backed by the given user map.
-func NewUserHandler(users map[string]*models.User) *UserHandler {
-	return &UserHandler{users: users}
+// NewUserHandler creates a handler backed by the given user and node maps.
+func NewUserHandler(users map[string]*models.User, nodes map[string]*models.Node) *UserHandler {
+	return &UserHandler{users: users, nodes: nodes, nextIP: 2} // start at 10.0.0.2
 }
 
 // createUserRequest is the JSON body for creating a new user.
 type createUserRequest struct {
-	Email string      `json:"email"`
-	Plan  models.Plan `json:"plan"`
+	Email  string      `json:"email"`
+	Plan   models.Plan `json:"plan"`
+	NodeID string      `json:"node_id"` // optional: assign to specific node
 }
 
 // Create handles POST /api/users.
@@ -66,11 +70,42 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 	user.PublicKey = keys.PublicKey
 	user.PrivateKey = keys.PrivateKey
 
+	// Assign to a node.
+	node := h.assignNode(req.NodeID)
+	if node == nil {
+		httputil.WriteError(w, http.StatusServiceUnavailable, "no available nodes")
+		return
+	}
+	user.AssignedNodeID = node.ID
+
+	// Assign an IP address in the 10.0.0.x range.
+	ip := fmt.Sprintf("10.0.0.%d", h.nextIP)
+	h.nextIP++
+	user.Address = ip + "/32"
+
 	h.mu.Lock()
 	h.users[user.ID] = user
+	node.CurrentPeers++
 	h.mu.Unlock()
 
-	httputil.WriteJSON(w, http.StatusCreated, user)
+	// Generate client config.
+	clientConfig, err := wireguard.GeneratePeerConfig(wireguard.PeerConfig{
+		PrivateKey: keys.PrivateKey,
+		Address:    ip + "/24",
+		DNS:        "1.1.1.1, 8.8.8.8",
+		PublicKey:  node.PublicKey,
+		Endpoint:   node.WireGuardEndpoint(),
+		AllowedIPs: "0.0.0.0/0",
+	})
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to generate client config")
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusCreated, map[string]any{
+		"user":          user,
+		"client_config": clientConfig,
+	})
 }
 
 // List handles GET /api/users.
@@ -115,6 +150,27 @@ func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	h.mu.Unlock()
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// assignNode picks the best available node for a new user.
+// If nodeID is specified, uses that node. Otherwise picks the node with most capacity.
+func (h *UserHandler) assignNode(nodeID string) *models.Node {
+	if nodeID != "" {
+		if node, ok := h.nodes[nodeID]; ok && node.HasCapacity() {
+			return node
+		}
+		return nil
+	}
+	var best *models.Node
+	for _, n := range h.nodes {
+		if !n.HasCapacity() {
+			continue
+		}
+		if best == nil || n.CurrentPeers < best.CurrentPeers {
+			best = n
+		}
+	}
+	return best
 }
 
 func generateID() (string, error) {

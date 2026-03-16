@@ -3,19 +3,21 @@ data "hcloud_ssh_key" "default" {
 }
 
 resource "hcloud_server" "vpn_node" {
-  count       = var.node_count
-  name        = "${var.node_name_prefix}-${count.index + 1}"
-  server_type = var.server_type
+  for_each = var.nodes
+
+  name        = each.key
+  server_type = each.value.server_type
   image       = var.image
-  location    = var.location
+  location    = each.value.location
 
   ssh_keys = [data.hcloud_ssh_key.default.id]
 
   user_data = file("${path.module}/../scripts/setup-node.sh")
 
   labels = {
-    role    = "vpn"
-    managed = "terraform"
+    role     = "vpn"
+    managed  = "terraform"
+    location = each.value.location
   }
 
   public_net {
