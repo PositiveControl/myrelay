@@ -86,6 +86,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/users", s.auth.RequireAdmin(userHandler.List))
 	s.mux.HandleFunc("GET /api/users/{id}", s.auth.RequireAdmin(userHandler.Get))
 	s.mux.HandleFunc("DELETE /api/users/{id}", s.auth.RequireAdmin(userHandler.Delete))
+	s.mux.HandleFunc("GET /api/users/{id}/rules", s.auth.RequireAdmin(userHandler.ListRules))
+	s.mux.HandleFunc("POST /api/users/{id}/rules", s.auth.RequireAdmin(userHandler.AddRule))
+	s.mux.HandleFunc("DELETE /api/users/{id}/rules/{ruleId}", s.auth.RequireAdmin(userHandler.RemoveRule))
+	s.mux.HandleFunc("GET /api/users/{id}/config", s.auth.RequireAdmin(userHandler.Config))
 
 	s.mux.HandleFunc("POST /api/nodes", s.auth.RequireAdmin(nodeHandler.Register))
 	s.mux.HandleFunc("GET /api/nodes", s.auth.RequireAdmin(nodeHandler.List))

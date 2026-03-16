@@ -68,6 +68,25 @@ func main() {
 		case "delete", "rm":
 			requireArg(args, 1, "user ID")
 			cmdUsersDelete(args[1])
+		case "rules":
+			requireArg(args, 1, "user ID")
+			if len(args) < 3 {
+				cmdUsersRulesList(args[1])
+				return
+			}
+			switch args[2] {
+			case "add":
+				cmdUsersRulesAdd(args[1], args[3:])
+			case "remove", "rm":
+				requireArg(args, 3, "rule ID")
+				cmdUsersRulesRemove(args[1], args[3])
+			default:
+				fmt.Fprintf(os.Stderr, "Unknown rules subcommand: %s\n", args[2])
+				os.Exit(1)
+			}
+		case "config":
+			requireArg(args, 1, "user ID")
+			cmdUsersConfig(args[1])
 		default:
 			cmdUsersGet(args[0])
 		}
@@ -95,6 +114,10 @@ Commands:
   users get <id|email>   Show user details
   users create           Create a new user (interactive)
   users delete <id>      Delete a user
+  users rules <id>       List network bypass rules
+  users rules <id> add   Add a bypass rule (--name, --network)
+  users rules <id> rm    Remove a bypass rule
+  users config <id>      Regenerate WireGuard client config
 
 Environment:
   VPN_API_URL            API base URL (default: http://localhost:8080)
@@ -345,6 +368,87 @@ func cmdUsersDelete(id string) {
 	} else {
 		body, _ := io.ReadAll(resp.Body)
 		fatal("Delete failed (%d): %s", resp.StatusCode, string(body))
+	}
+}
+
+// --- User Rules ---
+
+func cmdUsersRulesList(userID string) {
+	data := apiGet("/api/users/" + userID + "/rules")
+	var rules []map[string]any
+	json.Unmarshal(data, &rules)
+
+	if len(rules) == 0 {
+		fmt.Println("No network rules for this user.")
+		return
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tNAME\tNETWORK\tACTION")
+	fmt.Fprintln(w, "--\t----\t-------\t------")
+	for _, r := range rules {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+			truncate(r["id"].(string), 12), r["name"], r["network"], r["action"])
+	}
+	w.Flush()
+}
+
+func cmdUsersRulesAdd(userID string, args []string) {
+	var name, network string
+	for i := 0; i < len(args)-1; i += 2 {
+		switch args[i] {
+		case "--name":
+			name = args[i+1]
+		case "--network":
+			network = args[i+1]
+		}
+	}
+	if name == "" || network == "" {
+		fmt.Fprintln(os.Stderr, "Usage: vpnctl users rules <user_id> add --name <name> --network <cidr>")
+		os.Exit(1)
+	}
+
+	payload := map[string]string{
+		"name":    name,
+		"network": network,
+		"action":  "bypass",
+	}
+	data := apiPost("/api/users/"+userID+"/rules", payload)
+
+	var rule map[string]any
+	json.Unmarshal(data, &rule)
+	fmt.Printf("Rule added: %s (%s bypass %s)\n", truncate(rule["id"].(string), 12), name, network)
+}
+
+func cmdUsersRulesRemove(userID, ruleID string) {
+	req, _ := http.NewRequest("DELETE", apiURL+"/api/users/"+userID+"/rules/"+ruleID, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		fatal("API request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 204 {
+		fmt.Printf("Rule %s removed.\n", ruleID)
+	} else if resp.StatusCode == 404 {
+		fmt.Fprintf(os.Stderr, "Rule not found: %s\n", ruleID)
+		os.Exit(1)
+	} else {
+		body, _ := io.ReadAll(resp.Body)
+		fatal("Delete failed (%d): %s", resp.StatusCode, string(body))
+	}
+}
+
+// --- User Config ---
+
+func cmdUsersConfig(userID string) {
+	data := apiGet("/api/users/" + userID + "/config")
+	var result map[string]any
+	json.Unmarshal(data, &result)
+
+	if config, ok := result["config"].(string); ok {
+		fmt.Println(config)
 	}
 }
 

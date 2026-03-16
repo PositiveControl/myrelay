@@ -76,6 +76,15 @@ func (db *DB) migrate() error {
 			next_ip INTEGER NOT NULL DEFAULT 2
 		);
 		INSERT OR IGNORE INTO ip_counter (id, next_ip) VALUES (1, 2);
+
+		CREATE TABLE IF NOT EXISTS network_rules (
+			id      TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			name    TEXT NOT NULL,
+			network TEXT NOT NULL,
+			action  TEXT NOT NULL DEFAULT 'bypass',
+			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+		);
 	`)
 	if err != nil {
 		return err
@@ -262,6 +271,51 @@ func (db *DB) ListNodeTokens() (map[string]string, error) {
 		tokens[nodeID] = token
 	}
 	return tokens, rows.Err()
+}
+
+// --- Network Rules ---
+
+func (db *DB) CreateNetworkRule(rule *models.NetworkRule) error {
+	_, err := db.conn.Exec(
+		`INSERT INTO network_rules (id, user_id, name, network, action) VALUES (?, ?, ?, ?, ?)`,
+		rule.ID, rule.UserID, rule.Name, rule.Network, rule.Action,
+	)
+	return err
+}
+
+func (db *DB) ListNetworkRules(userID string) ([]*models.NetworkRule, error) {
+	rows, err := db.conn.Query(
+		`SELECT id, user_id, name, network, action FROM network_rules WHERE user_id = ?`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rules []*models.NetworkRule
+	for rows.Next() {
+		var r models.NetworkRule
+		if err := rows.Scan(&r.ID, &r.UserID, &r.Name, &r.Network, &r.Action); err != nil {
+			return nil, err
+		}
+		rules = append(rules, &r)
+	}
+	return rules, rows.Err()
+}
+
+func (db *DB) DeleteNetworkRule(id string) error {
+	_, err := db.conn.Exec(`DELETE FROM network_rules WHERE id = ?`, id)
+	return err
+}
+
+func (db *DB) GetNetworkRule(id string) (*models.NetworkRule, error) {
+	var r models.NetworkRule
+	err := db.conn.QueryRow(
+		`SELECT id, user_id, name, network, action FROM network_rules WHERE id = ?`, id,
+	).Scan(&r.ID, &r.UserID, &r.Name, &r.Network, &r.Action)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return &r, err
 }
 
 // --- IP Counter ---

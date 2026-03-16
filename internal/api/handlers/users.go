@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"strings"
 
 	"github.com/m7s/vpn/internal/agent"
 	"github.com/m7s/vpn/internal/db"
@@ -179,6 +181,188 @@ func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ListRules handles GET /api/users/{id}/rules.
+func (h *UserHandler) ListRules(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	user, err := h.db.GetUser(userID)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	if user == nil {
+		httputil.WriteError(w, http.StatusNotFound, "user not found")
+		return
+	}
+
+	rules, err := h.db.ListNetworkRules(userID)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to list rules")
+		return
+	}
+	if rules == nil {
+		rules = []*models.NetworkRule{}
+	}
+	httputil.WriteJSON(w, http.StatusOK, rules)
+}
+
+// createRuleRequest is the JSON body for adding a network rule.
+type createRuleRequest struct {
+	Name    string `json:"name"`
+	Network string `json:"network"`
+	Action  string `json:"action"`
+}
+
+// AddRule handles POST /api/users/{id}/rules.
+func (h *UserHandler) AddRule(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	user, err := h.db.GetUser(userID)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	if user == nil {
+		httputil.WriteError(w, http.StatusNotFound, "user not found")
+		return
+	}
+
+	var req createRuleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Name == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if req.Network == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "network is required (CIDR notation)")
+		return
+	}
+	if req.Action == "" {
+		req.Action = "bypass"
+	}
+	if req.Action != "bypass" {
+		httputil.WriteError(w, http.StatusBadRequest, "action must be 'bypass'")
+		return
+	}
+
+	// Validate CIDR
+	if _, _, err := net.ParseCIDR(req.Network); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid CIDR notation: "+err.Error())
+		return
+	}
+
+	id, err := generateID()
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to generate ID")
+		return
+	}
+
+	rule := &models.NetworkRule{
+		ID:      id,
+		UserID:  userID,
+		Name:    req.Name,
+		Network: req.Network,
+		Action:  req.Action,
+	}
+	if err := h.db.CreateNetworkRule(rule); err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to save rule")
+		return
+	}
+	httputil.WriteJSON(w, http.StatusCreated, rule)
+}
+
+// RemoveRule handles DELETE /api/users/{id}/rules/{ruleId}.
+func (h *UserHandler) RemoveRule(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	ruleID := r.PathValue("ruleId")
+
+	rule, err := h.db.GetNetworkRule(ruleID)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	if rule == nil || rule.UserID != userID {
+		httputil.WriteError(w, http.StatusNotFound, "rule not found")
+		return
+	}
+
+	if err := h.db.DeleteNetworkRule(ruleID); err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to delete rule")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Config handles GET /api/users/{id}/config — regenerates WireGuard client config with rules applied.
+func (h *UserHandler) Config(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	user, err := h.db.GetUser(userID)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	if user == nil {
+		httputil.WriteError(w, http.StatusNotFound, "user not found")
+		return
+	}
+
+	node, err := h.db.GetNode(user.AssignedNodeID)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	if node == nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "assigned node not found")
+		return
+	}
+
+	// Fetch bypass rules and compute AllowedIPs
+	rules, err := h.db.ListNetworkRules(userID)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to list rules")
+		return
+	}
+
+	var excludedCIDRs []string
+	for _, rule := range rules {
+		if rule.Action == "bypass" {
+			excludedCIDRs = append(excludedCIDRs, rule.Network)
+		}
+	}
+
+	allowedIPs, err := wireguard.ComputeAllowedIPs(excludedCIDRs)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to compute AllowedIPs: "+err.Error())
+		return
+	}
+
+	// Use /24 for client address (matching existing Create handler behavior)
+	address := user.Address
+	if strings.HasSuffix(address, "/32") {
+		address = strings.TrimSuffix(address, "/32") + "/24"
+	}
+
+	config, err := wireguard.GeneratePeerConfig(wireguard.PeerConfig{
+		PrivateKey: user.PrivateKey,
+		Address:    address,
+		DNS:        "1.1.1.1, 8.8.8.8",
+		PublicKey:  node.PublicKey,
+		Endpoint:   node.WireGuardEndpoint(),
+		AllowedIPs: allowedIPs,
+	})
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to generate config")
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, map[string]any{
+		"user_id":     userID,
+		"allowed_ips": allowedIPs,
+		"config":      config,
+	})
 }
 
 // assignNode picks the best available node.
