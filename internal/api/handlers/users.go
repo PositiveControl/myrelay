@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/m7s/vpn/internal/agent"
 	"github.com/m7s/vpn/internal/db"
@@ -123,10 +124,30 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httputil.WriteJSON(w, http.StatusCreated, map[string]any{
+	// Generate onboarding token.
+	onboardToken, err := generateOnboardingToken()
+	if err != nil {
+		log.Printf("Failed to generate onboarding token: %v", err)
+	}
+	var onboardingURL string
+	if onboardToken != "" {
+		expiresAt := time.Now().UTC().Add(7 * 24 * time.Hour)
+		if err := h.db.CreateOnboardingToken(user.ID, onboardToken, expiresAt); err != nil {
+			log.Printf("Failed to save onboarding token: %v", err)
+			onboardToken = ""
+		} else {
+			onboardingURL = "/onboard/" + onboardToken
+		}
+	}
+
+	resp := map[string]any{
 		"user":          user,
 		"client_config": clientConfig,
-	})
+	}
+	if onboardingURL != "" {
+		resp["onboarding_url"] = onboardingURL
+	}
+	httputil.WriteJSON(w, http.StatusCreated, resp)
 }
 
 // List handles GET /api/users.
@@ -396,6 +417,14 @@ func (h *UserHandler) assignNode(nodeID string) (*models.Node, error) {
 
 func generateID() (string, error) {
 	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func generateOnboardingToken() (string, error) {
+	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}

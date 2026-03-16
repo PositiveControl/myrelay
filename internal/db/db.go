@@ -77,6 +77,15 @@ func (db *DB) migrate() error {
 		);
 		INSERT OR IGNORE INTO ip_counter (id, next_ip) VALUES (1, 2);
 
+		CREATE TABLE IF NOT EXISTS onboarding_tokens (
+			token      TEXT PRIMARY KEY,
+			user_id    TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			used       BOOLEAN NOT NULL DEFAULT FALSE,
+			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+		);
+
 		CREATE TABLE IF NOT EXISTS network_rules (
 			id      TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL,
@@ -271,6 +280,50 @@ func (db *DB) ListNodeTokens() (map[string]string, error) {
 		tokens[nodeID] = token
 	}
 	return tokens, rows.Err()
+}
+
+// --- Onboarding Tokens ---
+
+// OnboardingToken represents a single-use onboarding link token.
+type OnboardingToken struct {
+	Token     string
+	UserID    string
+	CreatedAt time.Time
+	ExpiresAt time.Time
+	Used      bool
+}
+
+// CreateOnboardingToken stores a new onboarding token.
+func (db *DB) CreateOnboardingToken(userID, token string, expiresAt time.Time) error {
+	_, err := db.conn.Exec(
+		`INSERT INTO onboarding_tokens (token, user_id, created_at, expires_at, used) VALUES (?, ?, ?, ?, FALSE)`,
+		token, userID, time.Now().UTC().Format(time.RFC3339), expiresAt.Format(time.RFC3339),
+	)
+	return err
+}
+
+// GetOnboardingToken retrieves a token record. Returns nil if not found.
+func (db *DB) GetOnboardingToken(token string) (*OnboardingToken, error) {
+	var t OnboardingToken
+	var createdAt, expiresAt string
+	err := db.conn.QueryRow(
+		`SELECT token, user_id, created_at, expires_at, used FROM onboarding_tokens WHERE token = ?`, token,
+	).Scan(&t.Token, &t.UserID, &createdAt, &expiresAt, &t.Used)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	t.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	t.ExpiresAt, _ = time.Parse(time.RFC3339, expiresAt)
+	return &t, nil
+}
+
+// MarkOnboardingTokenUsed marks a token as used.
+func (db *DB) MarkOnboardingTokenUsed(token string) error {
+	_, err := db.conn.Exec(`UPDATE onboarding_tokens SET used = TRUE WHERE token = ?`, token)
+	return err
 }
 
 // --- Network Rules ---

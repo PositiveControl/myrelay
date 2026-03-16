@@ -1215,20 +1215,17 @@ func (t *TUI) showUserDetailModal() {
 	fmt.Fprintf(&sb, "  [gray]Bandwidth:[-]       [%s]%s[-] [white]%s / %s[-] [gray](%d%%)[-]\n",
 		bwColor, bar, formatBytes(user.BandwidthUsed), formatBytes(user.BandwidthLimit), pct)
 
-	// Show bypass info
-	bypassInfo := t.fetchUserBypass(user.ID)
-	if bypassInfo != nil {
-		source, _ := bypassInfo["source"].(string)
-		ruleNames, _ := bypassInfo["rule_names"].([]any)
-		if len(ruleNames) > 0 {
-			names := make([]string, len(ruleNames))
-			for i, r := range ruleNames {
-				names[i] = r.(string)
-			}
-			fmt.Fprintf(&sb, "\n  [gray]Bypass Rules:[-]    [yellow]%s[-] [gray](%s)[-]\n", strings.Join(names, ", "), source)
-		} else {
-			fmt.Fprintf(&sb, "\n  [gray]Bypass Rules:[-]    [white]none (full tunnel)[-] [gray](%s)[-]\n", source)
+	// Show network rules
+	rules := t.fetchUserRules(user.ID)
+	if len(rules) > 0 {
+		names := make([]string, len(rules))
+		for i, r := range rules {
+			rule := r.(map[string]any)
+			names[i] = fmt.Sprintf("%s (%s)", rule["name"], rule["network"])
 		}
+		fmt.Fprintf(&sb, "\n  [gray]Bypass Rules:[-]    [yellow]%s[-]\n", strings.Join(names, ", "))
+	} else {
+		fmt.Fprintf(&sb, "\n  [gray]Bypass Rules:[-]    [white]none (full tunnel)[-]\n")
 	}
 
 	fmt.Fprintf(&sb, "\n [gray]Press Esc or Enter to close[-]")
@@ -1239,9 +1236,9 @@ func (t *TUI) showUserDetailModal() {
 	t.rootPages.AddPage("userDetail", modal, true, true)
 }
 
-func (t *TUI) fetchUserBypass(userID string) map[string]any {
-	var result map[string]any
-	err := t.api.get(fmt.Sprintf("/api/users/%s/bypass", userID), &result)
+func (t *TUI) fetchUserRules(userID string) []any {
+	var result []any
+	err := t.api.get(fmt.Sprintf("/api/users/%s/rules", userID), &result)
 	if err != nil {
 		return nil
 	}

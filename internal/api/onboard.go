@@ -9,7 +9,6 @@ import (
 
 	qrcode "github.com/skip2/go-qrcode"
 
-	"github.com/m7s/vpn/internal/bypass"
 	"github.com/m7s/vpn/internal/db"
 	"github.com/m7s/vpn/internal/models"
 	"github.com/m7s/vpn/internal/wireguard"
@@ -131,11 +130,17 @@ func (s *Server) buildClientConfig(user *models.User) (string, error) {
 		ip = ip[:len(ip)-3] + "/24"
 	}
 
-	override, err := s.db.GetBypassOverride(user.ID)
+	rules, err := s.db.ListNetworkRules(user.ID)
 	if err != nil {
-		log.Printf("Failed to get bypass override for user %s: %v", user.ID, err)
+		log.Printf("Failed to list network rules for user %s: %v", user.ID, err)
 	}
-	allowedIPs, err := bypass.ComputeAllowedIPsForUser(user.Plan, override)
+	var excludedCIDRs []string
+	for _, rule := range rules {
+		if rule.Action == "bypass" {
+			excludedCIDRs = append(excludedCIDRs, rule.Network)
+		}
+	}
+	allowedIPs, err := wireguard.ComputeAllowedIPs(excludedCIDRs)
 	if err != nil {
 		log.Printf("Failed to compute AllowedIPs for user %s: %v", user.ID, err)
 		allowedIPs = "0.0.0.0/0"

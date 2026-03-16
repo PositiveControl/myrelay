@@ -79,7 +79,6 @@ func (s *Server) Start() error {
 func (s *Server) registerRoutes() {
 	userHandler := handlers.NewUserHandler(s.db, s.agents)
 	nodeHandler := handlers.NewNodeHandler(s.db, s.auth, s.agents)
-	bypassHandler := handlers.NewBypassHandler(s.db)
 
 	// Public.
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
@@ -93,11 +92,6 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/users/{id}/rules", s.auth.RequireAdmin(userHandler.AddRule))
 	s.mux.HandleFunc("DELETE /api/users/{id}/rules/{ruleId}", s.auth.RequireAdmin(userHandler.RemoveRule))
 	s.mux.HandleFunc("GET /api/users/{id}/config", s.auth.RequireAdmin(userHandler.Config))
-
-	// Bypass rules.
-	s.mux.HandleFunc("GET /api/bypass/rules", s.auth.RequireAdmin(bypassHandler.ListRules))
-	s.mux.HandleFunc("GET /api/users/{id}/bypass", s.auth.RequireAdmin(bypassHandler.GetUserBypass))
-	s.mux.HandleFunc("PUT /api/users/{id}/bypass", s.auth.RequireAdmin(bypassHandler.SetUserBypass))
 	s.mux.HandleFunc("POST /api/users/{id}/regen-config", s.auth.RequireAdmin(s.handleRegenConfig))
 
 	s.mux.HandleFunc("POST /api/nodes", s.auth.RequireAdmin(nodeHandler.Register))

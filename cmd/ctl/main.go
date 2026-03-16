@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
 	"text/tabwriter"
 	"time"
 )
@@ -87,6 +86,9 @@ func main() {
 		case "config":
 			requireArg(args, 1, "user ID")
 			cmdUsersConfig(args[1])
+		case "regen":
+			requireArg(args, 1, "user ID")
+			cmdUsersRegen(args[1])
 		default:
 			cmdUsersGet(args[0])
 		}
@@ -118,6 +120,7 @@ Commands:
   users rules <id> add   Add a bypass rule (--name, --network)
   users rules <id> rm    Remove a bypass rule
   users config <id>      Regenerate WireGuard client config
+  users regen <id>       Regenerate config + new onboarding link
 
 Environment:
   VPN_API_URL            API base URL (default: http://localhost:8080)
@@ -343,6 +346,11 @@ func cmdUsersCreate(args []string) {
 		fmt.Printf("Bandwidth:    %s\n", humanBytes(int64(user["bandwidth_limit"].(float64))))
 	}
 
+	if onboardURL, ok := result["onboarding_url"].(string); ok {
+		fmt.Printf("\nOnboarding URL: %s%s\n", apiURL, onboardURL)
+		fmt.Println("Send this link to the user to set up their VPN.")
+	}
+
 	if config, ok := result["client_config"].(string); ok {
 		fmt.Println("\n--- Client Config ---")
 		fmt.Println(config)
@@ -440,6 +448,26 @@ func cmdUsersRulesRemove(userID, ruleID string) {
 	}
 }
 
+// --- User Regen ---
+
+func cmdUsersRegen(id string) {
+	data := apiPostEmpty("/api/users/" + id + "/regen-config")
+
+	var result map[string]any
+	json.Unmarshal(data, &result)
+
+	if onboardURL, ok := result["onboarding_url"].(string); ok {
+		fmt.Printf("New onboarding URL: %s%s\n", apiURL, onboardURL)
+		fmt.Println("Send this link to the user to set up their VPN.")
+	}
+
+	if config, ok := result["client_config"].(string); ok {
+		fmt.Println("\n--- Client Config ---")
+		fmt.Println(config)
+		fmt.Println("--- End Config ---")
+	}
+}
+
 // --- User Config ---
 
 func cmdUsersConfig(userID string) {
@@ -482,6 +510,25 @@ func apiGetMaybe(path string) []byte {
 		fatal("API error (%d): %s", resp.StatusCode, string(body))
 	}
 	return body
+}
+
+func apiPostEmpty(path string) []byte {
+	req, _ := http.NewRequest("POST", apiURL+path, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		fatal("API request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == 401 {
+		fatal("Unauthorized. Set VPN_ADMIN_TOKEN.")
+	}
+	if resp.StatusCode >= 400 {
+		fatal("API error (%d): %s", resp.StatusCode, string(respBody))
+	}
+	return respBody
 }
 
 func apiPost(path string, payload any) []byte {
@@ -554,6 +601,3 @@ func envOrDefault(key, fallback string) string {
 	}
 	return fallback
 }
-
-// Ensure unused import doesn't cause issues
-var _ = strings.TrimSpace
