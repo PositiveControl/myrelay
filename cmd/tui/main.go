@@ -487,11 +487,11 @@ func (t *TUI) handleInput(event *tcell.EventKey) *tcell.EventKey {
 		}
 		return event
 	case tcell.KeyEnter:
-		if t.ui.activeTab == 1 {
+		if t.ui.activeTab == 1 && len(t.snap.Nodes) > 0 {
 			t.showNodeDetailModal()
 			return nil
 		}
-		if t.ui.activeTab == 2 {
+		if t.ui.activeTab == 2 && len(t.snap.Users) > 0 {
 			t.showUserDetailModal()
 			return nil
 		}
@@ -602,11 +602,14 @@ func (t *TUI) buildUsersPage() {
 func (t *TUI) switchTab() {
 	switch t.ui.activeTab {
 	case 0:
+		t.refreshDashboard()
 		t.pages.SwitchToPage("dashboard")
 	case 1:
+		t.refreshNodesTable()
 		t.pages.SwitchToPage("nodes")
 		t.app.SetFocus(t.nodeTable)
 	case 2:
+		t.refreshUsersTable()
 		t.pages.SwitchToPage("users")
 		t.app.SetFocus(t.userTable)
 	}
@@ -853,6 +856,8 @@ func (t *TUI) refreshNodesTable() {
 		return less
 	})
 
+	// Preserve selection
+	selRow, selCol := t.nodeTable.GetSelection()
 	t.nodeTable.Clear()
 
 	// Header row
@@ -927,6 +932,21 @@ func (t *TUI) refreshNodesTable() {
 		setCell(6, formatBytes(nb.In), colorLightCyan)
 		setCell(7, formatBytes(nb.Out), colorLightCyan)
 	}
+
+	// Restore selection — disable selectable if no data rows to prevent crashes
+	maxRow := t.nodeTable.GetRowCount() - 1
+	if maxRow < 1 {
+		t.nodeTable.SetSelectable(false, false)
+	} else {
+		t.nodeTable.SetSelectable(true, false)
+		if selRow > maxRow {
+			selRow = maxRow
+		}
+		if selRow < 1 {
+			selRow = 1
+		}
+		t.nodeTable.Select(selRow, selCol)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -999,6 +1019,8 @@ func (t *TUI) refreshUsersTable() {
 		return less
 	})
 
+	// Preserve selection
+	selRow, selCol := t.userTable.GetSelection()
 	t.userTable.Clear()
 
 	// Header
@@ -1069,6 +1091,21 @@ func (t *TUI) refreshUsersTable() {
 
 	if t.ui.userFilter != "" {
 		t.filterBox.SetText(t.ui.userFilter)
+	}
+
+	// Restore selection — disable selectable if no data rows to prevent crashes
+	maxRow := t.userTable.GetRowCount() - 1
+	if maxRow < 1 {
+		t.userTable.SetSelectable(false, false)
+	} else {
+		t.userTable.SetSelectable(true, false)
+		if selRow > maxRow {
+			selRow = maxRow
+		}
+		if selRow < 1 {
+			selRow = 1
+		}
+		t.userTable.Select(selRow, selCol)
 	}
 }
 
@@ -1249,9 +1286,16 @@ func (t *TUI) applySnapshot(snap Snapshot) {
 	t.updateHeader()
 	t.updateTabBar()
 	t.updateFooter()
-	t.refreshDashboard()
-	t.refreshNodesTable()
-	t.refreshUsersTable()
+
+	// Only refresh the active tab to avoid mutating off-screen tables
+	switch t.ui.activeTab {
+	case 0:
+		t.refreshDashboard()
+	case 1:
+		t.refreshNodesTable()
+	case 2:
+		t.refreshUsersTable()
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1261,13 +1305,16 @@ func (t *TUI) applySnapshot(snap Snapshot) {
 func main() {
 	tui := NewTUI()
 
-	// Force-quit signal handler — works even if the UI thread is stuck
+	// Force-quit signal handler — hard exit, don't wait for app.Stop()
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
+		// Hard exit: restore terminal and quit immediately
 		tui.app.Stop()
-		os.Exit(0)
+		// If Stop() hangs, force exit after 1 second
+		time.Sleep(1 * time.Second)
+		os.Exit(1)
 	}()
 
 	// Snapshot channel — poller sends, UI receives via QueueUpdateDraw
