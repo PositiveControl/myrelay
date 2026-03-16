@@ -77,18 +77,12 @@ func (db *DB) migrate() error {
 		);
 		INSERT OR IGNORE INTO ip_counter (id, next_ip) VALUES (1, 2);
 
-		CREATE TABLE IF NOT EXISTS onboarding_tokens (
-			token      TEXT PRIMARY KEY,
-			user_id    TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			expires_at TEXT NOT NULL,
-			used       BOOLEAN NOT NULL DEFAULT FALSE,
-			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-		);
-
-		CREATE TABLE IF NOT EXISTS user_bypass_overrides (
-			user_id    TEXT PRIMARY KEY,
-			rule_names TEXT NOT NULL,
+		CREATE TABLE IF NOT EXISTS network_rules (
+			id      TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			name    TEXT NOT NULL,
+			network TEXT NOT NULL,
+			action  TEXT NOT NULL DEFAULT 'bypass',
 			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 		);
 	`)
@@ -279,80 +273,49 @@ func (db *DB) ListNodeTokens() (map[string]string, error) {
 	return tokens, rows.Err()
 }
 
-// --- Onboarding Tokens ---
+// --- Network Rules ---
 
-// OnboardingToken represents a single-use onboarding link token.
-type OnboardingToken struct {
-	Token     string
-	UserID    string
-	CreatedAt time.Time
-	ExpiresAt time.Time
-	Used      bool
-}
-
-// CreateOnboardingToken stores a new onboarding token.
-func (db *DB) CreateOnboardingToken(userID, token string, expiresAt time.Time) error {
+func (db *DB) CreateNetworkRule(rule *models.NetworkRule) error {
 	_, err := db.conn.Exec(
-		`INSERT INTO onboarding_tokens (token, user_id, created_at, expires_at, used) VALUES (?, ?, ?, ?, FALSE)`,
-		token, userID, time.Now().UTC().Format(time.RFC3339), expiresAt.Format(time.RFC3339),
+		`INSERT INTO network_rules (id, user_id, name, network, action) VALUES (?, ?, ?, ?, ?)`,
+		rule.ID, rule.UserID, rule.Name, rule.Network, rule.Action,
 	)
 	return err
 }
 
-// GetOnboardingToken retrieves a token record. Returns nil if not found.
-func (db *DB) GetOnboardingToken(token string) (*OnboardingToken, error) {
-	var t OnboardingToken
-	var createdAt, expiresAt string
-	err := db.conn.QueryRow(
-		`SELECT token, user_id, created_at, expires_at, used FROM onboarding_tokens WHERE token = ?`, token,
-	).Scan(&t.Token, &t.UserID, &createdAt, &expiresAt, &t.Used)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
+func (db *DB) ListNetworkRules(userID string) ([]*models.NetworkRule, error) {
+	rows, err := db.conn.Query(
+		`SELECT id, user_id, name, network, action FROM network_rules WHERE user_id = ?`, userID)
 	if err != nil {
 		return nil, err
 	}
-	t.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-	t.ExpiresAt, _ = time.Parse(time.RFC3339, expiresAt)
-	return &t, nil
+	defer rows.Close()
+
+	var rules []*models.NetworkRule
+	for rows.Next() {
+		var r models.NetworkRule
+		if err := rows.Scan(&r.ID, &r.UserID, &r.Name, &r.Network, &r.Action); err != nil {
+			return nil, err
+		}
+		rules = append(rules, &r)
+	}
+	return rules, rows.Err()
 }
 
-// MarkOnboardingTokenUsed marks a token as used.
-func (db *DB) MarkOnboardingTokenUsed(token string) error {
-	_, err := db.conn.Exec(`UPDATE onboarding_tokens SET used = TRUE WHERE token = ?`, token)
+func (db *DB) DeleteNetworkRule(id string) error {
+	_, err := db.conn.Exec(`DELETE FROM network_rules WHERE id = ?`, id)
 	return err
 }
 
-// --- Bypass Overrides ---
-
-// GetBypassOverride returns the override for a user, or nil if no override is set.
-func (db *DB) GetBypassOverride(userID string) (*string, error) {
-	var ruleNames string
+func (db *DB) GetNetworkRule(id string) (*models.NetworkRule, error) {
+	var r models.NetworkRule
 	err := db.conn.QueryRow(
-		`SELECT rule_names FROM user_bypass_overrides WHERE user_id = ?`, userID,
-	).Scan(&ruleNames)
+		`SELECT id, user_id, name, network, action FROM network_rules WHERE id = ?`, id,
+	).Scan(&r.ID, &r.UserID, &r.Name, &r.Network, &r.Action)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	return &ruleNames, nil
-}
-
-// SetBypassOverride sets a per-user bypass override. An empty string means force full tunnel.
-func (db *DB) SetBypassOverride(userID, ruleNames string) error {
-	_, err := db.conn.Exec(
-		`INSERT OR REPLACE INTO user_bypass_overrides (user_id, rule_names) VALUES (?, ?)`,
-		userID, ruleNames,
-	)
-	return err
-}
-
-// ClearBypassOverride removes a per-user bypass override, reverting to plan defaults.
-func (db *DB) ClearBypassOverride(userID string) error {
-	_, err := db.conn.Exec(`DELETE FROM user_bypass_overrides WHERE user_id = ?`, userID)
-	return err
+	return &r, err
 }
 
 // --- IP Counter ---
