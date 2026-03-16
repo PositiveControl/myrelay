@@ -2,13 +2,14 @@ BINARY_DIR := bin
 API_BINARY := $(BINARY_DIR)/api
 AGENT_BINARY := $(BINARY_DIR)/agent
 CTL_BINARY := $(BINARY_DIR)/vpnctl
+TUI_BINARY := $(BINARY_DIR)/vpn-tui
 GO := go
 GOFLAGS := -trimpath
 LDFLAGS := -s -w
 
-.PHONY: all build-api build-agent build-ctl test fmt lint clean tf-init tf-plan tf-apply tf-destroy
+.PHONY: all build-api build-agent build-ctl build-tui test fmt lint clean tf-init tf-plan tf-apply tf-destroy
 
-all: build-api build-agent build-ctl
+all: build-api build-agent build-ctl build-tui
 
 build-api:
 	@mkdir -p $(BINARY_DIR)
@@ -21,6 +22,10 @@ build-agent:
 build-ctl:
 	@mkdir -p $(BINARY_DIR)
 	$(GO) build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(CTL_BINARY) ./cmd/ctl
+
+build-tui:
+	@mkdir -p $(BINARY_DIR)
+	$(GO) build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(TUI_BINARY) ./cmd/tui
 
 test:
 	$(GO) test -v -race -count=1 ./...

@@ -1,0 +1,1270 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
+)
+
+// Color constants for consistent theming.
+var (
+	colorCyan      = tcell.NewRGBColor(0, 255, 255)
+	colorLightCyan = tcell.NewRGBColor(224, 255, 255)
+	colorLightGray = tcell.NewRGBColor(211, 211, 211)
+	colorDarkCyan  = tcell.NewRGBColor(0, 139, 139)
+)
+
+// ---------------------------------------------------------------------------
+// Data models
+// ---------------------------------------------------------------------------
+
+type HealthResp struct {
+	Status string `json:"status"`
+	Time   string `json:"time"`
+}
+
+type Node struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	IP           string `json:"ip"`
+	Region       string `json:"region"`
+	PublicKey    string `json:"public_key"`
+	Endpoint     string `json:"endpoint"`
+	MaxPeers     int    `json:"max_peers"`
+	CurrentPeers int    `json:"current_peers"`
+	Status       string `json:"status"`
+}
+
+type User struct {
+	ID             string `json:"id"`
+	Email          string `json:"email"`
+	PublicKey      string `json:"public_key"`
+	PrivateKey     string `json:"private_key"`
+	Address        string `json:"address"`
+	AssignedNodeID string `json:"assigned_node_id"`
+	Plan           string `json:"plan"`
+	BandwidthUsed  int64  `json:"bandwidth_used"`
+	BandwidthLimit int64  `json:"bandwidth_limit"`
+	CreatedAt      string `json:"created_at"`
+}
+
+type BandwidthEntry struct {
+	PublicKey        string `json:"public_key"`
+	TotalReceived    int64  `json:"total_received"`
+	TotalSent        int64  `json:"total_sent"`
+	IntervalReceived int64  `json:"interval_received"`
+	IntervalSent     int64  `json:"interval_sent"`
+	LastUpdated      string `json:"last_updated"`
+}
+
+// ---------------------------------------------------------------------------
+// App state
+// ---------------------------------------------------------------------------
+
+type AppState struct {
+	mu              sync.RWMutex
+	healthy         bool
+	nodes           []Node
+	users           []User
+	nodeBandwidth   map[string][]BandwidthEntry // nodeID -> entries
+	lastRefresh     time.Time
+	totalBWIn       int64
+	totalBWOut      int64
+
+	// UI state
+	activeTab       int // 0=dashboard, 1=nodes, 2=users
+	nodeSortCol     int
+	nodeSortReverse bool
+	userSortCol     int
+	userSortReverse bool
+	userFilter      string
+	filterMode      bool
+	selectedNodeRow int
+	selectedUserRow int
+	showHelp        bool
+	showNodeDetail  bool
+	showUserDetail  bool
+}
+
+// ---------------------------------------------------------------------------
+// API client
+// ---------------------------------------------------------------------------
+
+type APIClient struct {
+	baseURL string
+	token   string
+	client  *http.Client
+}
+
+func NewAPIClient() *APIClient {
+	base := os.Getenv("VPN_API_URL")
+	if base == "" {
+		base = "http://localhost:8080"
+	}
+	base = strings.TrimRight(base, "/")
+	return &APIClient{
+		baseURL: base,
+		token:   os.Getenv("VPN_ADMIN_TOKEN"),
+		client:  &http.Client{Timeout: 5 * time.Second},
+	}
+}
+
+func (c *APIClient) get(path string, out interface{}) error {
+	req, err := http.NewRequest("GET", c.baseURL+path, nil)
+	if err != nil {
+		return err
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	return json.Unmarshal(body, out)
+}
+
+func (c *APIClient) CheckHealth() (*HealthResp, error) {
+	var h HealthResp
+	err := c.get("/api/health", &h)
+	return &h, err
+}
+
+func (c *APIClient) GetNodes() ([]Node, error) {
+	var nodes []Node
+	err := c.get("/api/nodes", &nodes)
+	return nodes, err
+}
+
+func (c *APIClient) GetUsers() ([]User, error) {
+	var users []User
+	err := c.get("/api/users", &users)
+	return users, err
+}
+
+func (c *APIClient) GetNodeBandwidth(nodeID string) ([]BandwidthEntry, error) {
+	var entries []BandwidthEntry
+	err := c.get(fmt.Sprintf("/api/nodes/%s/bandwidth", nodeID), &entries)
+	return entries, err
+}
+
+// ---------------------------------------------------------------------------
+// Formatting helpers
+// ---------------------------------------------------------------------------
+
+func formatBytes(b int64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+		TB = GB * 1024
+	)
+	switch {
+	case b >= TB:
+		return fmt.Sprintf("%.1f TB", float64(b)/float64(TB))
+	case b >= GB:
+		return fmt.Sprintf("%.1f GB", float64(b)/float64(GB))
+	case b >= MB:
+		return fmt.Sprintf("%.1f MB", float64(b)/float64(MB))
+	case b >= KB:
+		return fmt.Sprintf("%.1f KB", float64(b)/float64(KB))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
+}
+
+func capacityBar(current, max int, width int) string {
+	if max <= 0 {
+		return strings.Repeat("░", width)
+	}
+	pct := float64(current) / float64(max)
+	if pct > 1 {
+		pct = 1
+	}
+	filled := int(pct * float64(width))
+	if filled > width {
+		filled = width
+	}
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+	return bar
+}
+
+func capacityColor(current, max int) string {
+	if max <= 0 {
+		return "gray"
+	}
+	pct := float64(current) / float64(max)
+	switch {
+	case pct >= 0.8:
+		return "red"
+	case pct >= 0.5:
+		return "yellow"
+	default:
+		return "green"
+	}
+}
+
+func bandwidthBar(used, limit int64, width int) string {
+	if limit <= 0 {
+		return strings.Repeat("░", width)
+	}
+	pct := float64(used) / float64(limit)
+	if pct > 1 {
+		pct = 1
+	}
+	filled := int(pct * float64(width))
+	if filled > width {
+		filled = width
+	}
+	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+}
+
+func bandwidthColor(used, limit int64) string {
+	if limit <= 0 {
+		return "gray"
+	}
+	pct := float64(used) / float64(limit)
+	switch {
+	case pct >= 0.9:
+		return "red"
+	case pct >= 0.7:
+		return "yellow"
+	default:
+		return "green"
+	}
+}
+
+func statusColor(status string) string {
+	switch strings.ToLower(status) {
+	case "active", "online", "healthy":
+		return "green"
+	case "warning", "degraded":
+		return "yellow"
+	default:
+		return "red"
+	}
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	if n <= 3 {
+		return s[:n]
+	}
+	return s[:n-3] + "..."
+}
+
+// ---------------------------------------------------------------------------
+// TUI application
+// ---------------------------------------------------------------------------
+
+type TUI struct {
+	app       *tview.Application
+	pages     *tview.Pages
+	state     *AppState
+	api       *APIClient
+
+	// Main layout pieces
+	mainFlex    *tview.Flex
+	header      *tview.TextView
+	footer      *tview.TextView
+	tabBar      *tview.TextView
+	contentArea *tview.Flex
+
+	// Tab content
+	dashboardPage *tview.Flex
+	nodesPage     *tview.Flex
+	usersPage     *tview.Flex
+
+	// Dashboard widgets
+	statBoxes  *tview.Flex
+	nodeCards  *tview.Flex
+
+	// Node table
+	nodeTable *tview.Table
+
+	// User table
+	userTable  *tview.Table
+	filterBox  *tview.InputField
+}
+
+func NewTUI() *TUI {
+	t := &TUI{
+		app:   tview.NewApplication(),
+		state: &AppState{nodeBandwidth: make(map[string][]BandwidthEntry)},
+		api:   NewAPIClient(),
+	}
+	t.buildUI()
+	return t
+}
+
+func (t *TUI) buildUI() {
+	// Header
+	t.header = tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignLeft)
+	t.header.SetBackgroundColor(tcell.ColorDarkBlue)
+
+	// Tab bar
+	t.tabBar = tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignLeft)
+	t.tabBar.SetBackgroundColor(tcell.NewRGBColor(30, 30, 50))
+
+	// Footer
+	t.footer = tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignCenter)
+	t.footer.SetBackgroundColor(tcell.NewRGBColor(30, 30, 50))
+
+	// Build tab content
+	t.buildDashboardPage()
+	t.buildNodesPage()
+	t.buildUsersPage()
+
+	// Content area with pages
+	t.contentArea = tview.NewFlex()
+	t.pages = tview.NewPages().
+		AddPage("dashboard", t.dashboardPage, true, true).
+		AddPage("nodes", t.nodesPage, true, false).
+		AddPage("users", t.usersPage, true, false)
+
+	// Main layout
+	t.mainFlex = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(t.header, 1, 0, false).
+		AddItem(t.tabBar, 1, 0, false).
+		AddItem(t.pages, 0, 1, true).
+		AddItem(t.footer, 1, 0, false)
+
+	// Root pages: main + overlays
+	rootPages := tview.NewPages().
+		AddPage("main", t.mainFlex, true, true)
+
+	t.app.SetRoot(rootPages, true)
+
+	// Global input capture
+	t.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		// If help overlay is shown
+		if t.state.showHelp {
+			t.state.showHelp = false
+			rootPages.RemovePage("help")
+			return nil
+		}
+
+		// If modal is shown
+		if t.state.showNodeDetail {
+			if event.Key() == tcell.KeyEscape || event.Key() == tcell.KeyEnter {
+				t.state.showNodeDetail = false
+				rootPages.RemovePage("nodeDetail")
+				return nil
+			}
+			return event
+		}
+		if t.state.showUserDetail {
+			if event.Key() == tcell.KeyEscape || event.Key() == tcell.KeyEnter {
+				t.state.showUserDetail = false
+				rootPages.RemovePage("userDetail")
+				return nil
+			}
+			return event
+		}
+
+		// Filter mode on users tab
+		if t.state.filterMode {
+			if event.Key() == tcell.KeyEscape {
+				t.state.filterMode = false
+				t.state.userFilter = ""
+				t.filterBox.SetText("")
+				t.app.SetFocus(t.userTable)
+				t.refreshUsersTable()
+				return nil
+			}
+			if event.Key() == tcell.KeyEnter {
+				t.state.filterMode = false
+				t.state.userFilter = t.filterBox.GetText()
+				t.app.SetFocus(t.userTable)
+				t.refreshUsersTable()
+				return nil
+			}
+			return event
+		}
+
+		switch event.Key() {
+		case tcell.KeyCtrlC:
+			t.app.Stop()
+			return nil
+		case tcell.KeyTab:
+			t.state.activeTab = (t.state.activeTab + 1) % 3
+			t.switchTab()
+			return nil
+		case tcell.KeyEscape:
+			if t.state.activeTab == 2 && t.state.userFilter != "" {
+				t.state.userFilter = ""
+				t.filterBox.SetText("")
+				t.refreshUsersTable()
+				return nil
+			}
+			return event
+		case tcell.KeyEnter:
+			if t.state.activeTab == 1 {
+				t.showNodeDetailModal(rootPages)
+				return nil
+			}
+			if t.state.activeTab == 2 {
+				t.showUserDetailModal(rootPages)
+				return nil
+			}
+		}
+
+		switch event.Rune() {
+		case 'q':
+			t.app.Stop()
+			return nil
+		case '1':
+			t.state.activeTab = 0
+			t.switchTab()
+			return nil
+		case '2':
+			t.state.activeTab = 1
+			t.switchTab()
+			return nil
+		case '3':
+			t.state.activeTab = 2
+			t.switchTab()
+			return nil
+		case 's':
+			if t.state.activeTab == 1 {
+				t.state.nodeSortCol = (t.state.nodeSortCol + 1) % 8
+				t.refreshNodesTable()
+			} else if t.state.activeTab == 2 {
+				t.state.userSortCol = (t.state.userSortCol + 1) % 7
+				t.refreshUsersTable()
+			}
+			return nil
+		case 'r':
+			if t.state.activeTab == 1 {
+				t.state.nodeSortReverse = !t.state.nodeSortReverse
+				t.refreshNodesTable()
+			} else if t.state.activeTab == 2 {
+				t.state.userSortReverse = !t.state.userSortReverse
+				t.refreshUsersTable()
+			}
+			return nil
+		case '/':
+			if t.state.activeTab == 2 {
+				t.state.filterMode = true
+				t.filterBox.SetText(t.state.userFilter)
+				t.app.SetFocus(t.filterBox)
+				return nil
+			}
+		case '?':
+			t.showHelpOverlay(rootPages)
+			return nil
+		}
+
+		return event
+	})
+}
+
+func (t *TUI) buildDashboardPage() {
+	t.statBoxes = tview.NewFlex().SetDirection(tview.FlexColumn)
+	t.nodeCards = tview.NewFlex().SetDirection(tview.FlexRow)
+
+	cardScroll := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(t.nodeCards, 0, 1, false)
+
+	t.dashboardPage = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(t.statBoxes, 5, 0, false).
+		AddItem(cardScroll, 0, 1, false)
+}
+
+func (t *TUI) buildNodesPage() {
+	t.nodeTable = tview.NewTable().
+		SetBorders(false).
+		SetSelectable(true, false).
+		SetFixed(1, 0).
+		SetSeparator(tview.Borders.Vertical)
+	t.nodeTable.SetBackgroundColor(tcell.ColorDefault)
+	t.nodeTable.SetSelectedStyle(tcell.StyleDefault.
+		Foreground(tcell.ColorWhite).
+		Background(tcell.NewRGBColor(40, 60, 100)))
+
+	t.nodesPage = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(t.nodeTable, 0, 1, true)
+}
+
+func (t *TUI) buildUsersPage() {
+	t.userTable = tview.NewTable().
+		SetBorders(false).
+		SetSelectable(true, false).
+		SetFixed(1, 0).
+		SetSeparator(tview.Borders.Vertical)
+	t.userTable.SetBackgroundColor(tcell.ColorDefault)
+	t.userTable.SetSelectedStyle(tcell.StyleDefault.
+		Foreground(tcell.ColorWhite).
+		Background(tcell.NewRGBColor(40, 60, 100)))
+
+	t.filterBox = tview.NewInputField().
+		SetLabel(" Filter: ").
+		SetFieldWidth(40).
+		SetFieldBackgroundColor(tcell.NewRGBColor(40, 40, 60)).
+		SetLabelColor(colorCyan)
+
+	filterRow := tview.NewFlex().SetDirection(tview.FlexColumn).
+		AddItem(t.filterBox, 0, 1, false)
+	filterRow.SetBackgroundColor(tcell.NewRGBColor(30, 30, 50))
+
+	t.usersPage = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(filterRow, 1, 0, false).
+		AddItem(t.userTable, 0, 1, true)
+}
+
+func (t *TUI) switchTab() {
+	switch t.state.activeTab {
+	case 0:
+		t.pages.SwitchToPage("dashboard")
+	case 1:
+		t.pages.SwitchToPage("nodes")
+		t.app.SetFocus(t.nodeTable)
+	case 2:
+		t.pages.SwitchToPage("users")
+		t.app.SetFocus(t.userTable)
+	}
+	t.updateTabBar()
+}
+
+// ---------------------------------------------------------------------------
+// Header / Footer / Tab bar
+// ---------------------------------------------------------------------------
+
+func (t *TUI) updateHeader() {
+	t.state.mu.RLock()
+	healthy := t.state.healthy
+	lastRefresh := t.state.lastRefresh
+	t.state.mu.RUnlock()
+
+	statusDot := "[red]● DISCONNECTED[-]"
+	if healthy {
+		statusDot = "[green]● CONNECTED[-]"
+	}
+
+	now := time.Now().Format("2006-01-02 15:04:05")
+	refreshAgo := ""
+	if !lastRefresh.IsZero() {
+		refreshAgo = fmt.Sprintf(" [gray](refreshed %s ago)[-]", time.Since(lastRefresh).Truncate(time.Second))
+	}
+
+	t.header.SetText(fmt.Sprintf(
+		" [bold][cyan]VPN Control Plane[-][white]  %s  [gray]│[-]  [white]%s[-]%s",
+		statusDot, now, refreshAgo,
+	))
+}
+
+func (t *TUI) updateTabBar() {
+	tabs := []string{"Dashboard", "Nodes", "Users"}
+	var parts []string
+	for i, name := range tabs {
+		if i == t.state.activeTab {
+			parts = append(parts, fmt.Sprintf(" [black:cyan:b] %d %s [-:-:-] ", i+1, name))
+		} else {
+			parts = append(parts, fmt.Sprintf(" [gray]%d %s[-] ", i+1, name))
+		}
+	}
+	t.tabBar.SetText(strings.Join(parts, " "))
+}
+
+func (t *TUI) updateFooter() {
+	var hint string
+	switch t.state.activeTab {
+	case 0:
+		hint = "[cyan]1-3[-] tabs  [cyan]?[-] help  [cyan]q[-] quit"
+	case 1:
+		hint = "[cyan]↑↓[-] navigate  [cyan]Enter[-] detail  [cyan]s[-] sort  [cyan]r[-] reverse  [cyan]1-3[-] tabs  [cyan]?[-] help  [cyan]q[-] quit"
+	case 2:
+		filter := ""
+		if t.state.userFilter != "" {
+			filter = fmt.Sprintf("  [yellow]filter: %s[-]", t.state.userFilter)
+		}
+		hint = fmt.Sprintf("[cyan]↑↓[-] navigate  [cyan]Enter[-] detail  [cyan]/[-] filter  [cyan]Esc[-] clear  [cyan]s[-] sort  [cyan]r[-] reverse  [cyan]q[-] quit%s", filter)
+	}
+	t.footer.SetText(hint)
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard rendering
+// ---------------------------------------------------------------------------
+
+func makeStatBox(title, value string, color tcell.Color) *tview.TextView {
+	tv := tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignCenter)
+	tv.SetBorder(true).
+		SetBorderColor(color).
+		SetTitle(fmt.Sprintf(" %s ", title)).
+		SetTitleColor(color).
+		SetTitleAlign(tview.AlignCenter)
+	tv.SetBackgroundColor(tcell.NewRGBColor(20, 20, 35))
+	tv.SetText(fmt.Sprintf("\n[bold]%s[-]", value))
+	return tv
+}
+
+func (t *TUI) refreshDashboard() {
+	t.state.mu.RLock()
+	nodes := t.state.nodes
+	users := t.state.users
+	totalIn := t.state.totalBWIn
+	totalOut := t.state.totalBWOut
+	t.state.mu.RUnlock()
+
+	totalPeers := 0
+	activeNodes := 0
+	for _, n := range nodes {
+		totalPeers += n.CurrentPeers
+		if strings.EqualFold(n.Status, "active") || strings.EqualFold(n.Status, "online") {
+			activeNodes++
+		}
+	}
+
+	// Stat boxes
+	t.statBoxes.Clear()
+	t.statBoxes.AddItem(makeStatBox("NODES", fmt.Sprintf("%d / %d active", activeNodes, len(nodes)), colorCyan), 0, 1, false)
+	t.statBoxes.AddItem(makeStatBox("USERS", fmt.Sprintf("%d", len(users)), tcell.ColorBlue), 0, 1, false)
+	t.statBoxes.AddItem(makeStatBox("CONNECTIONS", fmt.Sprintf("%d", totalPeers), tcell.ColorGreen), 0, 1, false)
+	t.statBoxes.AddItem(makeStatBox("BANDWIDTH", fmt.Sprintf("↓%s  ↑%s", formatBytes(totalIn), formatBytes(totalOut)), tcell.ColorYellow), 0, 1, false)
+
+	// Node cards
+	t.nodeCards.Clear()
+
+	if len(nodes) == 0 {
+		empty := tview.NewTextView().SetDynamicColors(true).SetTextAlign(tview.AlignCenter)
+		empty.SetText("\n[gray]No nodes available[-]")
+		t.nodeCards.AddItem(empty, 3, 0, false)
+		return
+	}
+
+	// Lay out node cards in rows of 3
+	row := tview.NewFlex().SetDirection(tview.FlexColumn)
+	for i, node := range nodes {
+		card := t.makeNodeCard(node)
+		row.AddItem(card, 0, 1, false)
+		if (i+1)%3 == 0 || i == len(nodes)-1 {
+			t.nodeCards.AddItem(row, 8, 0, false)
+			if i < len(nodes)-1 {
+				row = tview.NewFlex().SetDirection(tview.FlexColumn)
+			}
+		}
+	}
+}
+
+func (t *TUI) makeNodeCard(node Node) *tview.TextView {
+	tv := tview.NewTextView().SetDynamicColors(true)
+	tv.SetBorder(true).
+		SetBorderColor(colorDarkCyan).
+		SetBackgroundColor(tcell.NewRGBColor(20, 20, 35))
+
+	sColor := statusColor(node.Status)
+	capColor := capacityColor(node.CurrentPeers, node.MaxPeers)
+	bar := capacityBar(node.CurrentPeers, node.MaxPeers, 16)
+	pct := 0
+	if node.MaxPeers > 0 {
+		pct = node.CurrentPeers * 100 / node.MaxPeers
+	}
+
+	// Bandwidth for this node
+	t.state.mu.RLock()
+	bwEntries := t.state.nodeBandwidth[node.ID]
+	t.state.mu.RUnlock()
+	var bwIn, bwOut int64
+	for _, e := range bwEntries {
+		bwIn += e.TotalReceived
+		bwOut += e.TotalSent
+	}
+
+	tv.SetTitle(fmt.Sprintf(" [bold]%s[-] ", node.Name)).
+		SetTitleColor(colorCyan).
+		SetTitleAlign(tview.AlignLeft)
+
+	text := fmt.Sprintf(
+		" [gray]IP:[-]     [white]%s[-]\n"+
+			" [gray]Region:[-] [white]%s[-]\n"+
+			" [gray]Status:[-] [%s]%s[-]\n"+
+			" [gray]Peers:[-]  [%s]%s[-] [white]%d/%d[-] [gray](%d%%)[-]\n"+
+			" [gray]BW:[-]    [white]↓%s  ↑%s[-]",
+		node.IP, node.Region,
+		sColor, strings.ToUpper(node.Status),
+		capColor, bar, node.CurrentPeers, node.MaxPeers, pct,
+		formatBytes(bwIn), formatBytes(bwOut),
+	)
+	tv.SetText(text)
+	return tv
+}
+
+// ---------------------------------------------------------------------------
+// Nodes table
+// ---------------------------------------------------------------------------
+
+var nodeColumns = []string{"Name", "IP", "Region", "Peers", "Capacity", "Status", "BW In", "BW Out"}
+
+func (t *TUI) refreshNodesTable() {
+	t.state.mu.RLock()
+	nodes := make([]Node, len(t.state.nodes))
+	copy(nodes, t.state.nodes)
+	bw := t.state.nodeBandwidth
+	t.state.mu.RUnlock()
+
+	// Compute bandwidth per node
+	type nodeBW struct {
+		In, Out int64
+	}
+	nbw := make(map[string]nodeBW)
+	for id, entries := range bw {
+		var in, out int64
+		for _, e := range entries {
+			in += e.TotalReceived
+			out += e.TotalSent
+		}
+		nbw[id] = nodeBW{in, out}
+	}
+
+	// Sort
+	col := t.state.nodeSortCol
+	rev := t.state.nodeSortReverse
+	sort.Slice(nodes, func(i, j int) bool {
+		var less bool
+		a, b := nodes[i], nodes[j]
+		switch col {
+		case 0:
+			less = strings.ToLower(a.Name) < strings.ToLower(b.Name)
+		case 1:
+			less = a.IP < b.IP
+		case 2:
+			less = strings.ToLower(a.Region) < strings.ToLower(b.Region)
+		case 3:
+			less = a.CurrentPeers < b.CurrentPeers
+		case 4:
+			pa, pb := 0.0, 0.0
+			if a.MaxPeers > 0 {
+				pa = float64(a.CurrentPeers) / float64(a.MaxPeers)
+			}
+			if b.MaxPeers > 0 {
+				pb = float64(b.CurrentPeers) / float64(b.MaxPeers)
+			}
+			less = pa < pb
+		case 5:
+			less = a.Status < b.Status
+		case 6:
+			less = nbw[a.ID].In < nbw[b.ID].In
+		case 7:
+			less = nbw[a.ID].Out < nbw[b.ID].Out
+		default:
+			less = a.Name < b.Name
+		}
+		if rev {
+			return !less
+		}
+		return less
+	})
+
+	t.nodeTable.Clear()
+
+	// Header row
+	for c, name := range nodeColumns {
+		label := name
+		if c == col {
+			arrow := "▲"
+			if rev {
+				arrow = "▼"
+			}
+			label = fmt.Sprintf("%s %s", name, arrow)
+		}
+		cell := tview.NewTableCell(label).
+			SetTextColor(colorCyan).
+			SetAttributes(tcell.AttrBold).
+			SetSelectable(false).
+			SetExpansion(1).
+			SetAlign(tview.AlignLeft)
+		cell.SetBackgroundColor(tcell.NewRGBColor(30, 30, 60))
+		t.nodeTable.SetCell(0, c, cell)
+	}
+
+	// Data rows
+	for r, node := range nodes {
+		row := r + 1
+		sColor := statusColor(node.Status)
+		capColor := capacityColor(node.CurrentPeers, node.MaxPeers)
+		bar := capacityBar(node.CurrentPeers, node.MaxPeers, 12)
+		pct := 0
+		if node.MaxPeers > 0 {
+			pct = node.CurrentPeers * 100 / node.MaxPeers
+		}
+		nb := nbw[node.ID]
+
+		bgColor := tcell.NewRGBColor(20, 20, 35)
+		if row%2 == 0 {
+			bgColor = tcell.NewRGBColor(28, 28, 45)
+		}
+
+		setCell := func(c int, text string, color tcell.Color) {
+			cell := tview.NewTableCell(text).
+				SetTextColor(color).
+				SetExpansion(1).
+				SetAlign(tview.AlignLeft).
+				SetBackgroundColor(bgColor)
+			t.nodeTable.SetCell(row, c, cell)
+		}
+
+		setCell(0, node.Name, tcell.ColorWhite)
+		setCell(1, node.IP, colorLightGray)
+		setCell(2, node.Region, colorLightGray)
+		setCell(3, fmt.Sprintf("%d/%d", node.CurrentPeers, node.MaxPeers), tcell.ColorWhite)
+
+		capText := fmt.Sprintf("%s %d%%", bar, pct)
+		capTColor := tcell.ColorGreen
+		switch capColor {
+		case "yellow":
+			capTColor = tcell.ColorYellow
+		case "red":
+			capTColor = tcell.ColorRed
+		}
+		setCell(4, capText, capTColor)
+
+		sTColor := tcell.ColorGreen
+		switch sColor {
+		case "yellow":
+			sTColor = tcell.ColorYellow
+		case "red":
+			sTColor = tcell.ColorRed
+		}
+		setCell(5, strings.ToUpper(node.Status), sTColor)
+		setCell(6, formatBytes(nb.In), colorLightCyan)
+		setCell(7, formatBytes(nb.Out), colorLightCyan)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Users table
+// ---------------------------------------------------------------------------
+
+var userColumns = []string{"Email", "Node", "Plan", "BW Used", "BW Limit", "Address", "Created"}
+
+func (t *TUI) filteredUsers() []User {
+	t.state.mu.RLock()
+	users := make([]User, 0, len(t.state.users))
+	nodes := t.state.nodes
+	t.state.mu.RUnlock()
+
+	nodeNames := make(map[string]string)
+	for _, n := range nodes {
+		nodeNames[n.ID] = n.Name
+	}
+
+	t.state.mu.RLock()
+	allUsers := t.state.users
+	t.state.mu.RUnlock()
+
+	filter := strings.ToLower(t.state.userFilter)
+	for _, u := range allUsers {
+		if filter != "" {
+			nn := nodeNames[u.AssignedNodeID]
+			match := strings.Contains(strings.ToLower(u.Email), filter) ||
+				strings.Contains(strings.ToLower(nn), filter) ||
+				strings.Contains(strings.ToLower(u.Plan), filter)
+			if !match {
+				continue
+			}
+		}
+		users = append(users, u)
+	}
+	return users
+}
+
+func (t *TUI) refreshUsersTable() {
+	users := t.filteredUsers()
+
+	t.state.mu.RLock()
+	nodes := t.state.nodes
+	t.state.mu.RUnlock()
+
+	nodeNames := make(map[string]string)
+	for _, n := range nodes {
+		nodeNames[n.ID] = n.Name
+	}
+
+	// Sort
+	col := t.state.userSortCol
+	rev := t.state.userSortReverse
+	sort.Slice(users, func(i, j int) bool {
+		var less bool
+		a, b := users[i], users[j]
+		switch col {
+		case 0:
+			less = strings.ToLower(a.Email) < strings.ToLower(b.Email)
+		case 1:
+			less = nodeNames[a.AssignedNodeID] < nodeNames[b.AssignedNodeID]
+		case 2:
+			less = a.Plan < b.Plan
+		case 3:
+			less = a.BandwidthUsed < b.BandwidthUsed
+		case 4:
+			less = a.BandwidthLimit < b.BandwidthLimit
+		case 5:
+			less = a.Address < b.Address
+		case 6:
+			less = a.CreatedAt < b.CreatedAt
+		default:
+			less = a.Email < b.Email
+		}
+		if rev {
+			return !less
+		}
+		return less
+	})
+
+	t.userTable.Clear()
+
+	// Header
+	for c, name := range userColumns {
+		label := name
+		if c == col {
+			arrow := "▲"
+			if rev {
+				arrow = "▼"
+			}
+			label = fmt.Sprintf("%s %s", name, arrow)
+		}
+		cell := tview.NewTableCell(label).
+			SetTextColor(colorCyan).
+			SetAttributes(tcell.AttrBold).
+			SetSelectable(false).
+			SetExpansion(1).
+			SetAlign(tview.AlignLeft)
+		cell.SetBackgroundColor(tcell.NewRGBColor(30, 30, 60))
+		t.userTable.SetCell(0, c, cell)
+	}
+
+	// Data rows
+	for r, user := range users {
+		row := r + 1
+		bgColor := tcell.NewRGBColor(20, 20, 35)
+		if row%2 == 0 {
+			bgColor = tcell.NewRGBColor(28, 28, 45)
+		}
+
+		nn := nodeNames[user.AssignedNodeID]
+		if nn == "" {
+			nn = truncate(user.AssignedNodeID, 12)
+		}
+
+		bwColor := bandwidthColor(user.BandwidthUsed, user.BandwidthLimit)
+		bar := bandwidthBar(user.BandwidthUsed, user.BandwidthLimit, 10)
+		bwTColor := tcell.ColorGreen
+		switch bwColor {
+		case "yellow":
+			bwTColor = tcell.ColorYellow
+		case "red":
+			bwTColor = tcell.ColorRed
+		}
+
+		created := user.CreatedAt
+		if len(created) > 10 {
+			created = created[:10]
+		}
+
+		setCell := func(c int, text string, color tcell.Color) {
+			cell := tview.NewTableCell(text).
+				SetTextColor(color).
+				SetExpansion(1).
+				SetAlign(tview.AlignLeft).
+				SetBackgroundColor(bgColor)
+			t.userTable.SetCell(row, c, cell)
+		}
+
+		setCell(0, user.Email, tcell.ColorWhite)
+		setCell(1, nn, colorLightGray)
+		setCell(2, user.Plan, colorLightCyan)
+		setCell(3, fmt.Sprintf("%s %s", bar, formatBytes(user.BandwidthUsed)), bwTColor)
+		setCell(4, formatBytes(user.BandwidthLimit), colorLightGray)
+		setCell(5, user.Address, colorLightGray)
+		setCell(6, created, tcell.ColorGray)
+	}
+
+	// Update filter display
+	if t.state.userFilter != "" {
+		t.filterBox.SetText(t.state.userFilter)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Detail modals
+// ---------------------------------------------------------------------------
+
+func (t *TUI) showNodeDetailModal(root *tview.Pages) {
+	row, _ := t.nodeTable.GetSelection()
+	if row < 1 {
+		return
+	}
+
+	t.state.mu.RLock()
+	idx := row - 1
+	if idx >= len(t.state.nodes) {
+		t.state.mu.RUnlock()
+		return
+	}
+	node := t.state.nodes[idx]
+	bwEntries := t.state.nodeBandwidth[node.ID]
+	t.state.mu.RUnlock()
+
+	tv := tview.NewTextView().SetDynamicColors(true)
+	tv.SetBorder(true).
+		SetTitle(fmt.Sprintf(" Node: %s ", node.Name)).
+		SetTitleColor(colorCyan).
+		SetBorderColor(colorCyan).
+		SetBackgroundColor(tcell.NewRGBColor(15, 15, 30))
+
+	sColor := statusColor(node.Status)
+	capColor := capacityColor(node.CurrentPeers, node.MaxPeers)
+	bar := capacityBar(node.CurrentPeers, node.MaxPeers, 20)
+	pct := 0
+	if node.MaxPeers > 0 {
+		pct = node.CurrentPeers * 100 / node.MaxPeers
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, " [bold][cyan]Node Details[-]\n\n")
+	fmt.Fprintf(&sb, "  [gray]ID:[-]         [white]%s[-]\n", node.ID)
+	fmt.Fprintf(&sb, "  [gray]Name:[-]       [white]%s[-]\n", node.Name)
+	fmt.Fprintf(&sb, "  [gray]IP:[-]         [white]%s[-]\n", node.IP)
+	fmt.Fprintf(&sb, "  [gray]Region:[-]     [white]%s[-]\n", node.Region)
+	fmt.Fprintf(&sb, "  [gray]Endpoint:[-]   [white]%s[-]\n", node.Endpoint)
+	fmt.Fprintf(&sb, "  [gray]Public Key:[-] [white]%s[-]\n", truncate(node.PublicKey, 44))
+	fmt.Fprintf(&sb, "  [gray]Status:[-]     [%s]%s[-]\n", sColor, strings.ToUpper(node.Status))
+	fmt.Fprintf(&sb, "  [gray]Capacity:[-]   [%s]%s[-] [white]%d/%d[-] [gray](%d%%)[-]\n\n", capColor, bar, node.CurrentPeers, node.MaxPeers, pct)
+
+	if len(bwEntries) > 0 {
+		fmt.Fprintf(&sb, " [bold][cyan]Per-Peer Bandwidth[-]\n\n")
+		fmt.Fprintf(&sb, "  [cyan]%-44s  %12s  %12s[-]\n", "Public Key", "Received", "Sent")
+		fmt.Fprintf(&sb, "  [gray]%s[-]\n", strings.Repeat("─", 72))
+		for _, e := range bwEntries {
+			fmt.Fprintf(&sb, "  [white]%-44s[-]  [lightcyan]%12s[-]  [lightcyan]%12s[-]\n",
+				truncate(e.PublicKey, 44), formatBytes(e.TotalReceived), formatBytes(e.TotalSent))
+		}
+	} else {
+		fmt.Fprintf(&sb, " [gray]No bandwidth data available[-]\n")
+	}
+
+	fmt.Fprintf(&sb, "\n [gray]Press Esc or Enter to close[-]")
+	tv.SetText(sb.String())
+
+	modal := makeModal(tv, 80, 24)
+	t.state.showNodeDetail = true
+	root.AddPage("nodeDetail", modal, true, true)
+}
+
+func (t *TUI) showUserDetailModal(root *tview.Pages) {
+	row, _ := t.userTable.GetSelection()
+	if row < 1 {
+		return
+	}
+
+	users := t.filteredUsers()
+	idx := row - 1
+	if idx >= len(users) {
+		return
+	}
+	user := users[idx]
+
+	t.state.mu.RLock()
+	nodes := t.state.nodes
+	t.state.mu.RUnlock()
+
+	nodeName := user.AssignedNodeID
+	for _, n := range nodes {
+		if n.ID == user.AssignedNodeID {
+			nodeName = n.Name
+			break
+		}
+	}
+
+	tv := tview.NewTextView().SetDynamicColors(true)
+	tv.SetBorder(true).
+		SetTitle(fmt.Sprintf(" User: %s ", user.Email)).
+		SetTitleColor(colorCyan).
+		SetBorderColor(colorCyan).
+		SetBackgroundColor(tcell.NewRGBColor(15, 15, 30))
+
+	bwColor := bandwidthColor(user.BandwidthUsed, user.BandwidthLimit)
+	bar := bandwidthBar(user.BandwidthUsed, user.BandwidthLimit, 20)
+	pct := 0
+	if user.BandwidthLimit > 0 {
+		pct = int(user.BandwidthUsed * 100 / user.BandwidthLimit)
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, " [bold][cyan]User Details[-]\n\n")
+	fmt.Fprintf(&sb, "  [gray]ID:[-]              [white]%s[-]\n", user.ID)
+	fmt.Fprintf(&sb, "  [gray]Email:[-]           [white]%s[-]\n", user.Email)
+	fmt.Fprintf(&sb, "  [gray]Plan:[-]            [lightcyan]%s[-]\n", user.Plan)
+	fmt.Fprintf(&sb, "  [gray]Address:[-]         [white]%s[-]\n", user.Address)
+	fmt.Fprintf(&sb, "  [gray]Assigned Node:[-]   [white]%s[-]\n", nodeName)
+	fmt.Fprintf(&sb, "  [gray]Public Key:[-]      [white]%s[-]\n", truncate(user.PublicKey, 44))
+	fmt.Fprintf(&sb, "  [gray]Created:[-]         [white]%s[-]\n\n", user.CreatedAt)
+	fmt.Fprintf(&sb, "  [gray]Bandwidth:[-]       [%s]%s[-] [white]%s / %s[-] [gray](%d%%)[-]\n",
+		bwColor, bar, formatBytes(user.BandwidthUsed), formatBytes(user.BandwidthLimit), pct)
+
+	fmt.Fprintf(&sb, "\n [gray]Press Esc or Enter to close[-]")
+	tv.SetText(sb.String())
+
+	modal := makeModal(tv, 70, 18)
+	t.state.showUserDetail = true
+	root.AddPage("userDetail", modal, true, true)
+}
+
+func (t *TUI) showHelpOverlay(root *tview.Pages) {
+	tv := tview.NewTextView().SetDynamicColors(true)
+	tv.SetBorder(true).
+		SetTitle(" Keyboard Shortcuts ").
+		SetTitleColor(colorCyan).
+		SetBorderColor(colorCyan).
+		SetBackgroundColor(tcell.NewRGBColor(15, 15, 30))
+
+	help := ` [bold][cyan]Navigation[-]
+  [yellow]1[-] / [yellow]2[-] / [yellow]3[-]    Switch tabs (Dashboard / Nodes / Users)
+  [yellow]Tab[-]          Next tab
+  [yellow]↑ ↓[-]          Navigate table rows
+
+ [bold][cyan]Tables[-]
+  [yellow]s[-]            Cycle sort column
+  [yellow]r[-]            Reverse sort order
+  [yellow]Enter[-]        Open detail modal
+  [yellow]/[-]            Filter (Users tab)
+  [yellow]Esc[-]          Clear filter / close modal
+
+ [bold][cyan]General[-]
+  [yellow]?[-]            Toggle this help
+  [yellow]q[-] / [yellow]Ctrl+C[-]  Quit
+
+ [gray]Press any key to close[-]`
+	tv.SetText(help)
+
+	modal := makeModal(tv, 56, 20)
+	t.state.showHelp = true
+	root.AddPage("help", modal, true, true)
+}
+
+func makeModal(content tview.Primitive, width, height int) *tview.Flex {
+	return tview.NewFlex().
+		AddItem(nil, 0, 1, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(nil, 0, 1, false).
+			AddItem(content, height, 0, true).
+			AddItem(nil, 0, 1, false), width, 0, true).
+		AddItem(nil, 0, 1, false)
+}
+
+// ---------------------------------------------------------------------------
+// Data polling
+// ---------------------------------------------------------------------------
+
+func (t *TUI) pollData() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	// Fetch immediately on start
+	t.fetchAll()
+	t.app.QueueUpdateDraw(func() {
+		t.refreshAll()
+	})
+
+	for range ticker.C {
+		t.fetchAll()
+		t.app.QueueUpdateDraw(func() {
+			t.refreshAll()
+		})
+	}
+}
+
+func (t *TUI) fetchAll() {
+	// Health
+	_, err := t.api.CheckHealth()
+	t.state.mu.Lock()
+	t.state.healthy = err == nil
+	t.state.lastRefresh = time.Now()
+	t.state.mu.Unlock()
+
+	// Nodes
+	nodes, err := t.api.GetNodes()
+	if err == nil {
+		t.state.mu.Lock()
+		t.state.nodes = nodes
+		t.state.mu.Unlock()
+
+		// Bandwidth per node
+		totalIn := int64(0)
+		totalOut := int64(0)
+		bwMap := make(map[string][]BandwidthEntry)
+		for _, node := range nodes {
+			entries, err := t.api.GetNodeBandwidth(node.ID)
+			if err == nil {
+				bwMap[node.ID] = entries
+				for _, e := range entries {
+					totalIn += e.TotalReceived
+					totalOut += e.TotalSent
+				}
+			}
+		}
+		t.state.mu.Lock()
+		t.state.nodeBandwidth = bwMap
+		t.state.totalBWIn = totalIn
+		t.state.totalBWOut = totalOut
+		t.state.mu.Unlock()
+	}
+
+	// Users
+	users, err := t.api.GetUsers()
+	if err == nil {
+		t.state.mu.Lock()
+		t.state.users = users
+		t.state.mu.Unlock()
+	}
+}
+
+func (t *TUI) refreshAll() {
+	t.updateHeader()
+	t.updateTabBar()
+	t.updateFooter()
+	t.refreshDashboard()
+	t.refreshNodesTable()
+	t.refreshUsersTable()
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+func main() {
+	tui := NewTUI()
+	go tui.pollData()
+
+	if err := tui.app.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
