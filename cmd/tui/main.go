@@ -1,9 +1,11 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/m7s/vpn/internal/tlsutil"
 	"github.com/rivo/tview"
 )
 
@@ -158,10 +161,28 @@ func NewAPIClient() *APIClient {
 		base = "http://localhost:8080"
 	}
 	base = strings.TrimRight(base, "/")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	// Load internal CA certificate for TLS verification if configured.
+	if caPath := os.Getenv("TLS_CA_CERT"); caPath != "" {
+		tlsCfg, err := tlsutil.ClientTLSConfig(caPath)
+		if err != nil {
+			log.Printf("warning: failed to load CA cert %s: %v (falling back to system roots)", caPath, err)
+		} else {
+			client.Transport = &http.Transport{TLSClientConfig: tlsCfg}
+		}
+	} else if strings.HasPrefix(base, "https://") {
+		// HTTPS URL but no CA cert — skip verification for self-signed certs.
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+	}
+
 	return &APIClient{
 		baseURL: base,
 		token:   os.Getenv("VPN_ADMIN_TOKEN"),
-		client:  &http.Client{Timeout: 5 * time.Second},
+		client:  client,
 	}
 }
 
