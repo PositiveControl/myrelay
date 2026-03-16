@@ -9,6 +9,7 @@ import (
 
 	qrcode "github.com/skip2/go-qrcode"
 
+	"github.com/m7s/vpn/internal/bypass"
 	"github.com/m7s/vpn/internal/db"
 	"github.com/m7s/vpn/internal/models"
 	"github.com/m7s/vpn/internal/wireguard"
@@ -52,8 +53,18 @@ func (s *Server) handleOnboardConfig(w http.ResponseWriter, r *http.Request) {
 	// Mark token as used (but allow re-downloads).
 	_ = s.db.MarkOnboardingTokenUsed(token)
 
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", `attachment; filename="vpn-config.conf"`)
+	// Name the file after the node's region for a friendly tunnel name in WireGuard.
+	filename := "vpn-config.conf"
+	node, err2 := s.db.GetNode(user.AssignedNodeID)
+	if err2 == nil && node != nil {
+		name := friendlyTunnelName(node.Region)
+		if name != "" {
+			filename = name + ".conf"
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/x-wireguard-profile")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	fmt.Fprint(w, clientConfig)
 }
 
@@ -84,6 +95,30 @@ func (s *Server) handleOnboardQR(w http.ResponseWriter, r *http.Request) {
 	w.Write(png)
 }
 
+var tunnelNames = map[string]string{
+	"hil":     "VPN-Oregon",
+	"ash":     "VPN-Virginia",
+	"nbg1":    "VPN-Germany",
+	"fsn1":    "VPN-Germany",
+	"hel1":    "VPN-Finland",
+	"sin":     "VPN-Singapore",
+	"us-west": "VPN-Oregon",
+	"us-east": "VPN-Virginia",
+	"eu-fin":  "VPN-Finland",
+	"eu-de":   "VPN-Germany",
+	"ap-sgp":  "VPN-Singapore",
+}
+
+func friendlyTunnelName(region string) string {
+	if name, ok := tunnelNames[region]; ok {
+		return name
+	}
+	if region != "" {
+		return "VPN-" + region
+	}
+	return ""
+}
+
 // buildClientConfig generates the WireGuard client configuration for a user.
 func (s *Server) buildClientConfig(user *models.User) (string, error) {
 	node, err := s.db.GetNode(user.AssignedNodeID)
@@ -95,13 +130,24 @@ func (s *Server) buildClientConfig(user *models.User) (string, error) {
 	if len(ip) > 3 && ip[len(ip)-3:] == "/32" {
 		ip = ip[:len(ip)-3] + "/24"
 	}
+
+	override, err := s.db.GetBypassOverride(user.ID)
+	if err != nil {
+		log.Printf("Failed to get bypass override for user %s: %v", user.ID, err)
+	}
+	allowedIPs, err := bypass.ComputeAllowedIPsForUser(user.Plan, override)
+	if err != nil {
+		log.Printf("Failed to compute AllowedIPs for user %s: %v", user.ID, err)
+		allowedIPs = "0.0.0.0/0"
+	}
+
 	return wireguard.GeneratePeerConfig(wireguard.PeerConfig{
 		PrivateKey: user.PrivateKey,
 		Address:    ip,
 		DNS:        "1.1.1.1, 8.8.8.8",
 		PublicKey:  node.PublicKey,
 		Endpoint:   node.WireGuardEndpoint(),
-		AllowedIPs: "0.0.0.0/0",
+		AllowedIPs: allowedIPs,
 	})
 }
 
@@ -215,6 +261,17 @@ h1{font-size:26px;font-weight:700;color:#1a365d;margin-bottom:8px}
   background:#f0fff4;border:1px solid #c6f6d5;border-radius:12px;
   padding:20px;font-size:18px;line-height:1.7;color:#276749;text-align:center;
 }
+.ios-step{
+  display:flex;align-items:flex-start;gap:14px;
+  background:#fff;border:1px solid #e2e8f0;border-radius:12px;
+  padding:16px;margin-top:12px;
+}
+.ios-step-num{
+  flex-shrink:0;width:36px;height:36px;border-radius:50%;
+  background:#ebf8ff;color:#2b6cb0;font-weight:700;font-size:15px;
+  display:flex;align-items:center;justify-content:center;
+}
+.ios-step-text{font-size:17px;line-height:1.5;color:#2d3748}
 .qr-toggle{
   display:block;width:100%;padding:16px;background:#f7fafc;border:1px solid #e2e8f0;
   border-radius:12px;font-size:17px;color:#4a5568;cursor:pointer;text-align:center;
@@ -255,10 +312,32 @@ h1{font-size:26px;font-weight:700;color:#1a365d;margin-bottom:8px}
 <div class="step" id="step2">
   <span class="step-number">2</span>
   <h2>Install Your VPN Profile</h2>
-  <p>Tap the button below to download your personal VPN configuration file.</p>
-  <a href="/onboard/{{.Token}}/config" class="btn btn-green">Tap to Install VPN</a>
-  <div class="hint">
+  <p>Tap the button below to add your VPN configuration.</p>
+  <a id="install-btn" href="/onboard/{{.Token}}/config" class="btn btn-green">Tap to Install VPN</a>
+  <div class="hint" id="install-hint">
     After tapping, WireGuard will ask to add the tunnel.<br>Tap <strong>&ldquo;Allow&rdquo;</strong> to finish.
+  </div>
+  <div id="ios-steps" style="display:none">
+    <div class="ios-step">
+      <div class="ios-step-num">2a</div>
+      <div class="ios-step-text">A popup asks to download &mdash; tap <strong>&ldquo;Download&rdquo;</strong></div>
+    </div>
+    <div class="ios-step">
+      <div class="ios-step-num">2b</div>
+      <div class="ios-step-text">Tap the <strong>&#9660; icon</strong> that appears in your address bar (top right)</div>
+    </div>
+    <div class="ios-step">
+      <div class="ios-step-num">2c</div>
+      <div class="ios-step-text">Tap the <strong>share icon</strong> &#65039; next to the file name<br><span style="font-size:32px">&#8686;</span></div>
+    </div>
+    <div class="ios-step">
+      <div class="ios-step-num">2d</div>
+      <div class="ios-step-text">Find and tap <strong>&ldquo;WireGuard&rdquo;</strong> in the share menu</div>
+    </div>
+    <div class="ios-step">
+      <div class="ios-step-num">2e</div>
+      <div class="ios-step-text">Tap <strong>&ldquo;Allow&rdquo;</strong> to add the VPN &#127881;</div>
+    </div>
   </div>
 </div>
 
@@ -293,9 +372,12 @@ h1{font-size:26px;font-weight:700;color:#1a365d;margin-bottom:8px}
 (function(){
   var link=document.getElementById('store-link');
   var ua=navigator.userAgent||'';
-  if(/iPhone|iPad|iPod/i.test(ua)){
+  var isIOS=/iPhone|iPad|iPod/i.test(ua);
+  if(isIOS){
     link.href='https://apps.apple.com/app/wireguard/id1441195209';
     link.textContent='Download from App Store';
+    document.getElementById('install-hint').style.display='none';
+    document.getElementById('ios-hint').style.display='block';
   }else if(/Android/i.test(ua)){
     link.href='https://play.google.com/store/apps/details?id=com.wireguard.android';
     link.textContent='Download from Play Store';

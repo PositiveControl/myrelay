@@ -68,8 +68,28 @@ func main() {
 		case "delete", "rm":
 			requireArg(args, 1, "user ID")
 			cmdUsersDelete(args[1])
+		case "bypass":
+			requireArg(args, 1, "user ID")
+			cmdUsersBypass(args[1], args[2:])
+		case "regen":
+			requireArg(args, 1, "user ID")
+			cmdUsersRegen(args[1])
 		default:
 			cmdUsersGet(args[0])
+		}
+	case "bypass":
+		if len(args) == 0 {
+			cmdBypassList()
+			return
+		}
+		switch args[0] {
+		case "list", "ls":
+			cmdBypassList()
+		case "defaults":
+			cmdBypassDefaults()
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown bypass subcommand: %s\n", args[0])
+			os.Exit(1)
 		}
 	case "help", "--help", "-h":
 		printUsage()
@@ -86,15 +106,21 @@ func printUsage() {
 Usage: vpnctl <command> [subcommand] [args]
 
 Commands:
-  status                 Show system overview
-  nodes                  List all nodes
-  nodes get <id>         Show node details
-  nodes add              Register a new node (interactive)
-  nodes bw <id>          Show bandwidth for a node
-  users                  List all users
-  users get <id|email>   Show user details
-  users create           Create a new user (interactive)
-  users delete <id>      Delete a user
+  status                                Show system overview
+  nodes                                 List all nodes
+  nodes get <id>                        Show node details
+  nodes add                             Register a new node (interactive)
+  nodes bw <id>                         Show bandwidth for a node
+  users                                 List all users
+  users get <id|email>                  Show user details
+  users create                          Create a new user (interactive)
+  users delete <id>                     Delete a user
+  users bypass <id>                     Show user's effective bypass rules
+  users bypass <id> --set apple,netflix Set per-user override
+  users bypass <id> --reset             Revert to plan defaults
+  users regen <id>                      Regenerate config + onboarding link
+  bypass list                           Show all bypass rules + CIDRs
+  bypass defaults                       Show plan default assignments
 
 Environment:
   VPN_API_URL            API base URL (default: http://localhost:8080)
@@ -353,6 +379,102 @@ func cmdUsersDelete(id string) {
 	}
 }
 
+// --- Bypass ---
+
+func cmdBypassList() {
+	data := apiGet("/api/bypass/rules")
+	var result map[string]any
+	json.Unmarshal(data, &result)
+
+	rules, _ := result["rules"].([]any)
+	if len(rules) == 0 {
+		fmt.Println("No bypass rules defined.")
+		return
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "RULE\tCIDRs")
+	fmt.Fprintln(w, "----\t-----")
+	for _, r := range rules {
+		rule := r.(map[string]any)
+		name := rule["name"].(string)
+		cidrs := rule["cidrs"].([]any)
+		cidrStrs := make([]string, len(cidrs))
+		for i, c := range cidrs {
+			cidrStrs[i] = c.(string)
+		}
+		fmt.Fprintf(w, "%s\t%s\n", name, strings.Join(cidrStrs, ", "))
+	}
+	w.Flush()
+}
+
+func cmdBypassDefaults() {
+	data := apiGet("/api/bypass/rules")
+	var result map[string]any
+	json.Unmarshal(data, &result)
+
+	defaults, _ := result["defaults"].(map[string]any)
+	fmt.Println("Plan Default Bypass Rules:")
+	fmt.Println()
+	for plan, rules := range defaults {
+		ruleList := rules.([]any)
+		if len(ruleList) == 0 {
+			fmt.Printf("  %-12s (full tunnel — no bypass)\n", plan)
+		} else {
+			names := make([]string, len(ruleList))
+			for i, r := range ruleList {
+				names[i] = r.(string)
+			}
+			fmt.Printf("  %-12s %s\n", plan, strings.Join(names, ", "))
+		}
+	}
+}
+
+func cmdUsersBypass(id string, args []string) {
+	// Check for --set or --reset flags
+	for i, arg := range args {
+		switch arg {
+		case "--set":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "Usage: vpnctl users bypass <id> --set <rule1,rule2,...>")
+				os.Exit(1)
+			}
+			ruleNames := args[i+1]
+			payload := map[string]*string{"rule_names": &ruleNames}
+			data := apiPut("/api/users/"+id+"/bypass", payload)
+			printJSON(data)
+			return
+		case "--reset":
+			payload := map[string]*string{"rule_names": nil}
+			data := apiPut("/api/users/"+id+"/bypass", payload)
+			printJSON(data)
+			return
+		}
+	}
+
+	// Default: show effective bypass rules
+	data := apiGet("/api/users/" + id + "/bypass")
+	printJSON(data)
+}
+
+func cmdUsersRegen(id string) {
+	data := apiPostEmpty("/api/users/" + id + "/regen-config")
+
+	var result map[string]any
+	json.Unmarshal(data, &result)
+
+	if onboardURL, ok := result["onboarding_url"].(string); ok {
+		fmt.Printf("New onboarding URL: %s%s\n", apiURL, onboardURL)
+		fmt.Println("Send this link to the user to set up their VPN.")
+	}
+
+	if config, ok := result["client_config"].(string); ok {
+		fmt.Println("\n--- Client Config ---")
+		fmt.Println(config)
+		fmt.Println("--- End Config ---")
+	}
+}
+
 // --- HTTP helpers ---
 
 func apiGet(path string) []byte {
@@ -383,6 +505,46 @@ func apiGetMaybe(path string) []byte {
 		fatal("API error (%d): %s", resp.StatusCode, string(body))
 	}
 	return body
+}
+
+func apiPut(path string, payload any) []byte {
+	body, _ := json.Marshal(payload)
+	req, _ := http.NewRequest("PUT", apiURL+path, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		fatal("API request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == 401 {
+		fatal("Unauthorized. Set VPN_ADMIN_TOKEN.")
+	}
+	if resp.StatusCode >= 400 {
+		fatal("API error (%d): %s", resp.StatusCode, string(respBody))
+	}
+	return respBody
+}
+
+func apiPostEmpty(path string) []byte {
+	req, _ := http.NewRequest("POST", apiURL+path, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		fatal("API request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == 401 {
+		fatal("Unauthorized. Set VPN_ADMIN_TOKEN.")
+	}
+	if resp.StatusCode >= 400 {
+		fatal("API error (%d): %s", resp.StatusCode, string(respBody))
+	}
+	return respBody
 }
 
 func apiPost(path string, payload any) []byte {
@@ -455,6 +617,3 @@ func envOrDefault(key, fallback string) string {
 	}
 	return fallback
 }
-
-// Ensure unused import doesn't cause issues
-var _ = strings.TrimSpace

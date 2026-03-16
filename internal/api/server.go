@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
@@ -77,6 +79,7 @@ func (s *Server) Start() error {
 func (s *Server) registerRoutes() {
 	userHandler := handlers.NewUserHandler(s.db, s.agents)
 	nodeHandler := handlers.NewNodeHandler(s.db, s.auth, s.agents)
+	bypassHandler := handlers.NewBypassHandler(s.db)
 
 	// Public.
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
@@ -86,6 +89,12 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/users", s.auth.RequireAdmin(userHandler.List))
 	s.mux.HandleFunc("GET /api/users/{id}", s.auth.RequireAdmin(userHandler.Get))
 	s.mux.HandleFunc("DELETE /api/users/{id}", s.auth.RequireAdmin(userHandler.Delete))
+
+	// Bypass rules.
+	s.mux.HandleFunc("GET /api/bypass/rules", s.auth.RequireAdmin(bypassHandler.ListRules))
+	s.mux.HandleFunc("GET /api/users/{id}/bypass", s.auth.RequireAdmin(bypassHandler.GetUserBypass))
+	s.mux.HandleFunc("PUT /api/users/{id}/bypass", s.auth.RequireAdmin(bypassHandler.SetUserBypass))
+	s.mux.HandleFunc("POST /api/users/{id}/regen-config", s.auth.RequireAdmin(s.handleRegenConfig))
 
 	s.mux.HandleFunc("POST /api/nodes", s.auth.RequireAdmin(nodeHandler.Register))
 	s.mux.HandleFunc("GET /api/nodes", s.auth.RequireAdmin(nodeHandler.List))
@@ -100,6 +109,45 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /onboard/{token}", s.handleOnboardPage)
 	s.mux.HandleFunc("GET /onboard/{token}/config", s.handleOnboardConfig)
 	s.mux.HandleFunc("GET /onboard/{token}/qr", s.handleOnboardQR)
+}
+
+// handleRegenConfig regenerates a user's onboarding token and config.
+func (s *Server) handleRegenConfig(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	user, err := s.db.GetUser(id)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	if user == nil {
+		httputil.WriteError(w, http.StatusNotFound, "user not found")
+		return
+	}
+
+	clientConfig, err := s.buildClientConfig(user)
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to generate config")
+		return
+	}
+
+	// Generate new onboarding token.
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to generate token")
+		return
+	}
+	token := hex.EncodeToString(b)
+	expiresAt := time.Now().UTC().Add(7 * 24 * time.Hour)
+	if err := s.db.CreateOnboardingToken(user.ID, token, expiresAt); err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to save token")
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, map[string]any{
+		"client_config":  clientConfig,
+		"onboarding_url": "/onboard/" + token,
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

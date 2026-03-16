@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/m7s/vpn/internal/agent"
+	"github.com/m7s/vpn/internal/bypass"
 	"github.com/m7s/vpn/internal/db"
 	"github.com/m7s/vpn/internal/httputil"
 	"github.com/m7s/vpn/internal/models"
@@ -108,6 +109,13 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Failed to increment peer count for node %s: %v", node.ID, err)
 	}
 
+	// Compute AllowedIPs based on plan defaults (new user has no override).
+	allowedIPs, err := bypass.ComputeAllowedIPsForUser(user.Plan, nil)
+	if err != nil {
+		log.Printf("Failed to compute AllowedIPs: %v", err)
+		allowedIPs = "0.0.0.0/0" // fallback to full tunnel
+	}
+
 	// Generate client config.
 	clientConfig, err := wireguard.GeneratePeerConfig(wireguard.PeerConfig{
 		PrivateKey: keys.PrivateKey,
@@ -115,7 +123,7 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 		DNS:        "1.1.1.1, 8.8.8.8",
 		PublicKey:  node.PublicKey,
 		Endpoint:   node.WireGuardEndpoint(),
-		AllowedIPs: "0.0.0.0/0",
+		AllowedIPs: allowedIPs,
 	})
 	if err != nil {
 		httputil.WriteError(w, http.StatusInternalServerError, "failed to generate client config")

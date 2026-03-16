@@ -85,6 +85,12 @@ func (db *DB) migrate() error {
 			used       BOOLEAN NOT NULL DEFAULT FALSE,
 			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 		);
+
+		CREATE TABLE IF NOT EXISTS user_bypass_overrides (
+			user_id    TEXT PRIMARY KEY,
+			rule_names TEXT NOT NULL,
+			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+		);
 	`)
 	if err != nil {
 		return err
@@ -314,6 +320,38 @@ func (db *DB) GetOnboardingToken(token string) (*OnboardingToken, error) {
 // MarkOnboardingTokenUsed marks a token as used.
 func (db *DB) MarkOnboardingTokenUsed(token string) error {
 	_, err := db.conn.Exec(`UPDATE onboarding_tokens SET used = TRUE WHERE token = ?`, token)
+	return err
+}
+
+// --- Bypass Overrides ---
+
+// GetBypassOverride returns the override for a user, or nil if no override is set.
+func (db *DB) GetBypassOverride(userID string) (*string, error) {
+	var ruleNames string
+	err := db.conn.QueryRow(
+		`SELECT rule_names FROM user_bypass_overrides WHERE user_id = ?`, userID,
+	).Scan(&ruleNames)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ruleNames, nil
+}
+
+// SetBypassOverride sets a per-user bypass override. An empty string means force full tunnel.
+func (db *DB) SetBypassOverride(userID, ruleNames string) error {
+	_, err := db.conn.Exec(
+		`INSERT OR REPLACE INTO user_bypass_overrides (user_id, rule_names) VALUES (?, ?)`,
+		userID, ruleNames,
+	)
+	return err
+}
+
+// ClearBypassOverride removes a per-user bypass override, reverting to plan defaults.
+func (db *DB) ClearBypassOverride(userID string) error {
+	_, err := db.conn.Exec(`DELETE FROM user_bypass_overrides WHERE user_id = ?`, userID)
 	return err
 }
 
