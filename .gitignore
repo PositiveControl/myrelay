@@ -30,6 +30,8 @@ override.tf.json
 *.conf
 !*.conf.tmpl
 certs/
+peers.json
+*.db
 
 # IDE
 .idea/
