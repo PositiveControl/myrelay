@@ -1,5 +1,4 @@
 BINARY_DIR := bin
-API_BINARY := $(BINARY_DIR)/api
 AGENT_BINARY := $(BINARY_DIR)/agent
 CTL_BINARY := $(BINARY_DIR)/vpnctl
 TUI_BINARY := $(BINARY_DIR)/vpn-tui
@@ -7,13 +6,9 @@ GO := go
 GOFLAGS := -trimpath
 LDFLAGS := -s -w
 
-.PHONY: all build-api build-agent build-ctl build-tui test fmt lint clean tf-init tf-plan tf-apply tf-destroy
+.PHONY: all build-agent build-ctl build-tui test fmt lint clean
 
-all: build-api build-agent build-ctl build-tui
-
-build-api:
-	@mkdir -p $(BINARY_DIR)
-	$(GO) build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(API_BINARY) ./cmd/api
+all: build-agent build-ctl build-tui
 
 build-agent:
 	@mkdir -p $(BINARY_DIR)
@@ -32,7 +27,6 @@ test:
 
 fmt:
 	$(GO) fmt ./...
-	terraform fmt -recursive terraform/
 
 lint:
 	$(GO) vet ./...
@@ -44,15 +38,3 @@ lint:
 
 clean:
 	rm -rf $(BINARY_DIR)
-
-tf-init:
-	cd terraform && terraform init
-
-tf-plan:
-	cd terraform && terraform plan
-
-tf-apply:
-	cd terraform && terraform apply
-
-tf-destroy:
-	cd terraform && terraform destroy

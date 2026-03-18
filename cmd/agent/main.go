@@ -14,12 +14,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/PositiveControl/myrelay/internal/bandwidth"
+	"github.com/PositiveControl/myrelay/pkg/bandwidth"
 	"github.com/PositiveControl/myrelay/internal/config"
-	"github.com/PositiveControl/myrelay/internal/security"
-	"github.com/PositiveControl/myrelay/internal/tlsutil"
-	"github.com/PositiveControl/myrelay/internal/validate"
-	"github.com/PositiveControl/myrelay/internal/wireguard"
+	"github.com/PositiveControl/myrelay/pkg/security"
+	"github.com/PositiveControl/myrelay/pkg/tlsutil"
+	"github.com/PositiveControl/myrelay/pkg/validate"
+	"github.com/PositiveControl/myrelay/pkg/wireguard"
 )
 
 func main() {

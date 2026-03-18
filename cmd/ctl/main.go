@@ -14,7 +14,7 @@ import (
 	qrcode "github.com/skip2/go-qrcode"
 
 	"github.com/PositiveControl/myrelay/internal/config"
-	"github.com/PositiveControl/myrelay/internal/wireguard"
+	"github.com/PositiveControl/myrelay/pkg/wireguard"
 )
 
 var (
