@@ -7,19 +7,27 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
+
+	qrcode "github.com/skip2/go-qrcode"
+
+	"github.com/PositiveControl/myrelay/internal/config"
+	"github.com/PositiveControl/myrelay/internal/wireguard"
 )
 
 var (
-	apiURL string
-	token  string
-	client = &http.Client{Timeout: 10 * time.Second}
+	apiURL     string
+	token      string
+	client     = &http.Client{Timeout: 10 * time.Second}
+	configPath string
 )
 
 func main() {
-	apiURL = envOrDefault("VPN_API_URL", "http://localhost:8080")
+	apiURL = envOrDefault("VPN_API_URL", "")
 	token = envOrDefault("VPN_ADMIN_TOKEN", "")
+	configPath = envOrDefault("VPN_CONFIG", config.DefaultPath)
 
 	if len(os.Args) < 2 {
 		printUsage()
@@ -30,9 +38,48 @@ func main() {
 	args := os.Args[2:]
 
 	switch cmd {
+	// === Local (standalone) commands ===
+	case "peer":
+		if len(args) == 0 {
+			cmdPeerList()
+			return
+		}
+		switch args[0] {
+		case "add":
+			requireArg(args, 1, "peer name")
+			cmdPeerAdd(args[1])
+		case "remove", "rm":
+			requireArg(args, 1, "peer name")
+			cmdPeerRemove(args[1])
+		case "list", "ls":
+			cmdPeerList()
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown peer subcommand: %s\n", args[0])
+			os.Exit(1)
+		}
+	case "config":
+		if len(args) == 0 {
+			fmt.Fprintln(os.Stderr, "Usage: vpnctl config show <peer-name>")
+			os.Exit(1)
+		}
+		switch args[0] {
+		case "show":
+			requireArg(args, 1, "peer name")
+			cmdConfigShow(args[1])
+		default:
+			// Treat as peer name: vpnctl config <name>
+			cmdConfigShow(args[0])
+		}
+	case "qr":
+		requireArg(args, 0, "peer name")
+		cmdQR(args[0])
+
+	// === Remote (managed/API) commands ===
 	case "status":
+		requireAPI()
 		cmdStatus()
 	case "nodes":
+		requireAPI()
 		if len(args) == 0 {
 			cmdNodesList()
 			return
@@ -52,6 +99,7 @@ func main() {
 			cmdNodesGet(args[0])
 		}
 	case "users":
+		requireAPI()
 		if len(args) == 0 {
 			cmdUsersList()
 			return
@@ -93,6 +141,7 @@ func main() {
 			cmdUsersGet(args[0])
 		}
 	case "security":
+		requireAPI()
 		if len(args) == 0 {
 			cmdSecurityAll()
 		} else {
@@ -108,19 +157,26 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println(`vpnctl — VPN control plane CLI
+	fmt.Println(`vpnctl — VPN management CLI
 
 Usage: vpnctl <command> [subcommand] [args]
 
-Commands:
+Local commands (standalone mode — no API required):
+  peer add <name>        Add a new peer (generates keys, shows config)
+  peer remove <name>     Remove a peer
+  peer list              List all configured peers
+  config show <name>     Show WireGuard client config for a peer
+  qr <name>              Show QR code for a peer's config
+
+Remote commands (managed mode — requires VPN_API_URL):
   status                 Show system overview
   nodes                  List all nodes
   nodes get <id>         Show node details
-  nodes add              Register a new node (interactive)
+  nodes add              Register a new node
   nodes bw <id>          Show bandwidth for a node
   users                  List all users
   users get <id|email>   Show user details
-  users create           Create a new user (interactive)
+  users create           Create a new user
   users delete <id>      Delete a user
   users rules <id>       List network bypass rules
   users rules <id> add   Add a bypass rule (--name, --network)
@@ -131,11 +187,167 @@ Commands:
   security <node_id>     Show security status for a specific node
 
 Environment:
-  VPN_API_URL            API base URL (default: http://localhost:8080)
-  VPN_ADMIN_TOKEN        Admin authentication token`)
+  VPN_CONFIG             Path to peer config file (default: /etc/vpn/peers.json)
+  VPN_API_URL            API base URL (for remote commands)
+  VPN_ADMIN_TOKEN        Admin authentication token (for remote commands)`)
 }
 
-// --- Status ---
+// requireAPI ensures VPN_API_URL is set for remote commands.
+func requireAPI() {
+	if apiURL == "" {
+		fatal("VPN_API_URL not set. Remote commands require a control plane API.\nFor local peer management, use: vpnctl peer add <name>")
+	}
+}
+
+// === Local (standalone) commands ===
+
+func loadConfig() *config.Config {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fatal("Failed to load config %s: %v", configPath, err)
+	}
+	return cfg
+}
+
+func cmdPeerAdd(name string) {
+	cfg := loadConfig()
+
+	// Generate WireGuard keypair locally. Private key never leaves this machine.
+	keys, err := wireguard.GenerateKeyPair()
+	if err != nil {
+		fatal("Failed to generate WireGuard keys: %v", err)
+	}
+
+	peer, address, err := cfg.AddPeer(name, keys.PublicKey)
+	if err != nil {
+		fatal("Failed to add peer: %v", err)
+	}
+
+	fmt.Printf("Peer added: %s\n", name)
+	fmt.Printf("Address:    %s\n", address)
+	fmt.Printf("Public key: %s\n", peer.PublicKey)
+
+	// Generate and display client config.
+	clientAddr := strings.TrimSuffix(address, "/32") + "/24"
+	clientConfig, err := wireguard.GeneratePeerConfig(wireguard.PeerConfig{
+		PrivateKey: keys.PrivateKey,
+		Address:    clientAddr,
+		DNS:        cfg.Server.DNS,
+		PublicKey:  cfg.Server.PublicKey,
+		Endpoint:   cfg.Server.Endpoint,
+		AllowedIPs: "0.0.0.0/0",
+	})
+	if err != nil {
+		fatal("Failed to generate client config: %v", err)
+	}
+
+	fmt.Println("\n--- WireGuard Client Config ---")
+	fmt.Println(clientConfig)
+	fmt.Println("--- End Config ---")
+	fmt.Println("\nSave this config to a .conf file and import into WireGuard.")
+	fmt.Println("The agent will automatically pick up the new peer.")
+
+	// Print QR code hint.
+	fmt.Printf("\nTo show a QR code: vpnctl qr %s\n", name)
+	fmt.Println("(Note: the private key is shown above only once. Save it now.)")
+}
+
+func cmdPeerRemove(name string) {
+	cfg := loadConfig()
+	peer, err := cfg.RemovePeer(name)
+	if err != nil {
+		fatal("Failed to remove peer: %v", err)
+	}
+	fmt.Printf("Peer removed: %s (%s)\n", name, peer.AllowedIPs)
+	fmt.Println("The agent will automatically remove the peer from WireGuard.")
+}
+
+func cmdPeerList() {
+	cfg := loadConfig()
+	peers := cfg.ListPeers()
+
+	if len(peers) == 0 {
+		fmt.Println("No peers configured.")
+		fmt.Println("Add one with: vpnctl peer add <name>")
+		return
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tADDRESS\tPUBLIC KEY\tCREATED")
+	fmt.Fprintln(w, "----\t-------\t----------\t-------")
+	for _, p := range peers {
+		created := p.CreatedAt.Format("2006-01-02 15:04")
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+			p.Name, p.AllowedIPs, truncate(p.PublicKey, 20), created)
+	}
+	w.Flush()
+}
+
+func cmdConfigShow(name string) {
+	cfg := loadConfig()
+	peer := cfg.GetPeer(name)
+	if peer == nil {
+		fatal("Peer not found: %s", name)
+	}
+
+	if cfg.Server.PublicKey == "" {
+		fatal("Server public key not set. Run the agent first to auto-detect, or set it in %s", configPath)
+	}
+
+	// We can't show the private key here — it was only displayed at creation time.
+	// Show a placeholder and instruct the user.
+	clientAddr := strings.TrimSuffix(peer.AllowedIPs, "/32") + "/24"
+	clientConfig, err := wireguard.GeneratePeerConfig(wireguard.PeerConfig{
+		PrivateKey: "<YOUR_PRIVATE_KEY>",
+		Address:    clientAddr,
+		DNS:        cfg.Server.DNS,
+		PublicKey:  cfg.Server.PublicKey,
+		Endpoint:   cfg.Server.Endpoint,
+		AllowedIPs: "0.0.0.0/0",
+	})
+	if err != nil {
+		fatal("Failed to generate config: %v", err)
+	}
+
+	fmt.Println(clientConfig)
+	fmt.Println("Note: Replace <YOUR_PRIVATE_KEY> with the private key shown when the peer was created.")
+}
+
+func cmdQR(name string) {
+	cfg := loadConfig()
+	peer := cfg.GetPeer(name)
+	if peer == nil {
+		fatal("Peer not found: %s", name)
+	}
+
+	if cfg.Server.PublicKey == "" {
+		fatal("Server public key not set. Run the agent first to auto-detect, or set it in %s", configPath)
+	}
+
+	// Same limitation — we don't store the private key.
+	clientAddr := strings.TrimSuffix(peer.AllowedIPs, "/32") + "/24"
+	clientConfig, err := wireguard.GeneratePeerConfig(wireguard.PeerConfig{
+		PrivateKey: "<YOUR_PRIVATE_KEY>",
+		Address:    clientAddr,
+		DNS:        cfg.Server.DNS,
+		PublicKey:  cfg.Server.PublicKey,
+		Endpoint:   cfg.Server.Endpoint,
+		AllowedIPs: "0.0.0.0/0",
+	})
+	if err != nil {
+		fatal("Failed to generate config: %v", err)
+	}
+
+	qr, err := qrcode.New(clientConfig, qrcode.Medium)
+	if err != nil {
+		fatal("Failed to generate QR code: %v", err)
+	}
+
+	fmt.Println(qr.ToSmallString(false))
+	fmt.Println("Note: Replace <YOUR_PRIVATE_KEY> in the config with the private key shown when the peer was created.")
+}
+
+// === Remote (managed/API) commands ===
 
 func cmdStatus() {
 	nodes := apiGet("/api/nodes")
@@ -151,7 +363,6 @@ func cmdStatus() {
 	fmt.Printf("Nodes:  %d\n", len(nodeList))
 	fmt.Printf("Users:  %d\n\n", len(userList))
 
-	// Node summary
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "NODE\tLOCATION\tIP\tPEERS\tSTATUS")
 	fmt.Fprintln(w, "----\t--------\t--\t-----\t------")
@@ -295,13 +506,11 @@ func cmdUsersList() {
 }
 
 func cmdUsersGet(idOrEmail string) {
-	// Try by ID first
 	data := apiGetMaybe("/api/users/" + idOrEmail)
 	if data != nil {
 		printJSON(data)
 		return
 	}
-	// Search by email in the list
 	listData := apiGet("/api/users")
 	var users []map[string]any
 	json.Unmarshal(listData, &users)
@@ -359,9 +568,9 @@ func cmdUsersCreate(args []string) {
 		fmt.Println("Send this link to the user to set up their VPN.")
 	}
 
-	if config, ok := result["client_config"].(string); ok {
+	if cfg, ok := result["client_config"].(string); ok {
 		fmt.Println("\n--- Client Config ---")
-		fmt.Println(config)
+		fmt.Println(cfg)
 		fmt.Println("--- End Config ---")
 		fmt.Println("\nSave the config above to a .conf file and import into WireGuard.")
 	}
@@ -469,9 +678,9 @@ func cmdUsersRegen(id string) {
 		fmt.Println("Send this link to the user to set up their VPN.")
 	}
 
-	if config, ok := result["client_config"].(string); ok {
+	if cfg, ok := result["client_config"].(string); ok {
 		fmt.Println("\n--- Client Config ---")
-		fmt.Println(config)
+		fmt.Println(cfg)
 		fmt.Println("--- End Config ---")
 	}
 }
@@ -483,8 +692,8 @@ func cmdUsersConfig(userID string) {
 	var result map[string]any
 	json.Unmarshal(data, &result)
 
-	if config, ok := result["config"].(string); ok {
-		fmt.Println(config)
+	if cfg, ok := result["config"].(string); ok {
+		fmt.Println(cfg)
 	}
 }
 
@@ -635,13 +844,11 @@ func cmdSecurityNode(nodeID string) {
 		return "FAIL"
 	}
 
-	// TLS
 	if tls, ok := s["tls"].(map[string]any); ok {
 		enabled, _ := tls["enabled"].(bool)
 		fmt.Printf("  TLS:                %s\n", check(enabled))
 	}
 
-	// Fail2Ban
 	if f2b, ok := s["fail2ban"].(map[string]any); ok {
 		active, _ := f2b["active"].(bool)
 		banned := int(f2b["currently_banned"].(float64))
@@ -649,7 +856,6 @@ func cmdSecurityNode(nodeID string) {
 		fmt.Printf("  Fail2Ban:           %s  (banned: %d, total: %d)\n", check(active), banned, totalBanned)
 	}
 
-	// SSH
 	if ssh, ok := s["ssh"].(map[string]any); ok {
 		rootHardened, _ := ssh["root_login_hardened"].(bool)
 		pwDisabled, _ := ssh["password_auth_disabled"].(bool)
@@ -659,13 +865,11 @@ func cmdSecurityNode(nodeID string) {
 		fmt.Printf("  SSH Max Auth Tries: %d\n", maxAuth)
 	}
 
-	// Unattended Upgrades
 	if uu, ok := s["unattended_upgrades"].(map[string]any); ok {
 		active, _ := uu["active"].(bool)
 		fmt.Printf("  Auto Updates:       %s\n", check(active))
 	}
 
-	// Firewall
 	if fw, ok := s["firewall"].(map[string]any); ok {
 		active, _ := fw["active"].(bool)
 		rules, _ := fw["rules"].([]any)

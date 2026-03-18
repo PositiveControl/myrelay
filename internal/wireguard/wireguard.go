@@ -186,6 +186,44 @@ func ApplyConfig(interfaceName, configPath string) error {
 	return nil
 }
 
+// ReadServerPublicKey reads the server's own public key from a WireGuard
+// interface by parsing the first line of `wg show <iface> dump`.
+func ReadServerPublicKey(interfaceName string) (string, error) {
+	cmd := exec.Command("wg", "show", interfaceName, "public-key")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("wg show %s public-key: %w", interfaceName, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// ReadServerEndpoint attempts to determine the server's public endpoint
+// by reading the interface's listen port and discovering the public IP.
+// Returns "IP:port" or an error.
+func ReadServerEndpoint(interfaceName string) (string, error) {
+	cmd := exec.Command("wg", "show", interfaceName, "listen-port")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("wg show %s listen-port: %w", interfaceName, err)
+	}
+	port := strings.TrimSpace(string(out))
+	if port == "" {
+		port = "51820"
+	}
+
+	// Try to determine external IP from default route interface.
+	ipCmd := exec.Command("hostname", "-I")
+	ipOut, err := ipCmd.Output()
+	if err != nil {
+		return ":" + port, nil
+	}
+	fields := strings.Fields(string(ipOut))
+	if len(fields) > 0 {
+		return fields[0] + ":" + port, nil
+	}
+	return ":" + port, nil
+}
+
 // SyncPeers calls `wg set` to add or remove a peer on a live interface without
 // restarting.
 func SyncPeers(interfaceName string, publicKey string, allowedIPs string, remove bool) error {

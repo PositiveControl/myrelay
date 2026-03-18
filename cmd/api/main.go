@@ -7,9 +7,9 @@ import (
 	"net"
 	"os"
 
-	"github.com/m7s/vpn/internal/api"
-	"github.com/m7s/vpn/internal/db"
-	"github.com/m7s/vpn/internal/tlsutil"
+	"github.com/PositiveControl/myrelay/internal/api"
+	"github.com/PositiveControl/myrelay/internal/db"
+	"github.com/PositiveControl/myrelay/internal/tlsutil"
 )
 
 func main() {

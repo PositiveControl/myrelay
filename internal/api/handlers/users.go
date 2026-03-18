@@ -11,11 +11,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/m7s/vpn/internal/agent"
-	"github.com/m7s/vpn/internal/db"
-	"github.com/m7s/vpn/internal/httputil"
-	"github.com/m7s/vpn/internal/models"
-	"github.com/m7s/vpn/internal/wireguard"
+	"github.com/PositiveControl/myrelay/internal/agent"
+	"github.com/PositiveControl/myrelay/internal/db"
+	"github.com/PositiveControl/myrelay/internal/httputil"
+	"github.com/PositiveControl/myrelay/internal/models"
+	"github.com/PositiveControl/myrelay/internal/validate"
+	"github.com/PositiveControl/myrelay/internal/wireguard"
 )
 
 // UserHandler handles HTTP requests for user management.
@@ -31,9 +32,10 @@ func NewUserHandler(database *db.DB, agents *agent.Client) *UserHandler {
 
 // createUserRequest is the JSON body for creating a new user.
 type createUserRequest struct {
-	Email  string      `json:"email"`
-	Plan   models.Plan `json:"plan"`
-	NodeID string      `json:"node_id"`
+	Email     string      `json:"email"`
+	Plan      models.Plan `json:"plan"`
+	NodeID    string      `json:"node_id"`
+	PublicKey string      `json:"public_key"` // Client-provided public key (recommended for security)
 }
 
 // Create handles POST /api/users.
@@ -64,14 +66,25 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	user := models.NewUser(id, req.Email, req.Plan)
 
-	// Generate WireGuard keys for the user.
-	keys, err := wireguard.GenerateKeyPair()
-	if err != nil {
-		httputil.WriteError(w, http.StatusInternalServerError, "failed to generate WireGuard keys")
-		return
+	// Use client-provided public key if available (preferred: server never sees private key).
+	// Fall back to server-side generation for backward compatibility.
+	if req.PublicKey != "" {
+		if err := validate.WireGuardKey(req.PublicKey); err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "invalid public_key: "+err.Error())
+			return
+		}
+		user.PublicKey = req.PublicKey
+		// Private key stays empty — client holds it.
+	} else {
+		keys, err := wireguard.GenerateKeyPair()
+		if err != nil {
+			httputil.WriteError(w, http.StatusInternalServerError, "failed to generate WireGuard keys")
+			return
+		}
+		user.PublicKey = keys.PublicKey
+		user.PrivateKey = keys.PrivateKey
+		log.Printf("Warning: server-side key generation used for user %s — client-side key generation is recommended", req.Email)
 	}
-	user.PublicKey = keys.PublicKey
-	user.PrivateKey = keys.PrivateKey
 
 	// Assign to a node.
 	node, err := h.assignNode(req.NodeID)
@@ -95,7 +108,7 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 	user.Address = ip + "/32"
 
 	// Push peer to the node's WireGuard interface via the agent.
-	if err := h.agents.AddPeer(node.ID, keys.PublicKey, user.Address); err != nil {
+	if err := h.agents.AddPeer(node.ID, user.PublicKey, user.Address); err != nil {
 		log.Printf("Failed to push peer to node %s: %v", node.ID, err)
 		httputil.WriteError(w, http.StatusBadGateway, "failed to configure VPN node: "+err.Error())
 		return
@@ -110,18 +123,22 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Failed to increment peer count for node %s: %v", node.ID, err)
 	}
 
-	// Generate client config.
-	clientConfig, err := wireguard.GeneratePeerConfig(wireguard.PeerConfig{
-		PrivateKey: keys.PrivateKey,
-		Address:    ip + "/24",
-		DNS:        "1.1.1.1, 8.8.8.8",
-		PublicKey:  node.PublicKey,
-		Endpoint:   node.WireGuardEndpoint(),
-		AllowedIPs: "0.0.0.0/0",
-	})
-	if err != nil {
-		httputil.WriteError(w, http.StatusInternalServerError, "failed to generate client config")
-		return
+	// Generate client config (only if server holds the private key — backward compat).
+	var clientConfig string
+	if user.PrivateKey != "" {
+		cfg, err := wireguard.GeneratePeerConfig(wireguard.PeerConfig{
+			PrivateKey: user.PrivateKey,
+			Address:    ip + "/24",
+			DNS:        "1.1.1.1, 8.8.8.8",
+			PublicKey:  node.PublicKey,
+			Endpoint:   node.WireGuardEndpoint(),
+			AllowedIPs: "0.0.0.0/0",
+		})
+		if err != nil {
+			httputil.WriteError(w, http.StatusInternalServerError, "failed to generate client config")
+			return
+		}
+		clientConfig = cfg
 	}
 
 	// Generate onboarding token.
@@ -141,11 +158,20 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]any{
-		"user":          user,
-		"client_config": clientConfig,
+		"user": user,
+	}
+	if clientConfig != "" {
+		resp["client_config"] = clientConfig
 	}
 	if onboardingURL != "" {
 		resp["onboarding_url"] = onboardingURL
+	}
+	// When client-side keys are used, include server info so the client
+	// can build its own config.
+	if user.PrivateKey == "" {
+		resp["server_public_key"] = node.PublicKey
+		resp["server_endpoint"] = node.WireGuardEndpoint()
+		resp["assigned_address"] = user.Address
 	}
 	httputil.WriteJSON(w, http.StatusCreated, resp)
 }

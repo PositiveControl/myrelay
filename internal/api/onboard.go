@@ -9,9 +9,9 @@ import (
 
 	qrcode "github.com/skip2/go-qrcode"
 
-	"github.com/m7s/vpn/internal/db"
-	"github.com/m7s/vpn/internal/models"
-	"github.com/m7s/vpn/internal/wireguard"
+	"github.com/PositiveControl/myrelay/internal/db"
+	"github.com/PositiveControl/myrelay/internal/models"
+	"github.com/PositiveControl/myrelay/internal/wireguard"
 )
 
 // handleOnboardPage serves the onboarding HTML page for a given token.

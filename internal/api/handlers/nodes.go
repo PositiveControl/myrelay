@@ -7,11 +7,11 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/m7s/vpn/internal/agent"
-	"github.com/m7s/vpn/internal/bandwidth"
-	"github.com/m7s/vpn/internal/db"
-	"github.com/m7s/vpn/internal/httputil"
-	"github.com/m7s/vpn/internal/models"
+	"github.com/PositiveControl/myrelay/internal/agent"
+	"github.com/PositiveControl/myrelay/internal/bandwidth"
+	"github.com/PositiveControl/myrelay/internal/db"
+	"github.com/PositiveControl/myrelay/internal/httputil"
+	"github.com/PositiveControl/myrelay/internal/models"
 )
 
 // TokenGenerator generates authentication tokens for nodes.

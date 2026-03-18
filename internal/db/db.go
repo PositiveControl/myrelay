@@ -8,7 +8,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/m7s/vpn/internal/models"
+	"github.com/PositiveControl/myrelay/internal/models"
 )
 
 // DB wraps the SQLite database connection.

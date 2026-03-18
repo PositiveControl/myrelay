@@ -1,171 +1,195 @@
-# VPN Service
+# MyRelay
 
-A WireGuard-based VPN service with a control plane API, per-node agents, CLI, and terminal UI dashboard. Deployed on Hetzner Cloud via Terraform across multiple regions.
-
-## Architecture
-
-- **Control Plane API** (`cmd/api`): HTTP API for managing users and VPN nodes. Handles user registration, key generation, peer assignment, bandwidth tracking, onboarding, and bypass rules.
-- **Node Agent** (`cmd/agent`): Runs on each VPN node. Applies WireGuard configuration changes, monitors per-peer bandwidth, and reports usage back to the control plane.
-- **CLI** (`cmd/ctl`): Command-line tool (`vpnctl`) for managing nodes, users, bypass rules, and viewing system status.
-- **TUI Dashboard** (`cmd/tui`): Terminal UI with real-time stats, node cards, sortable tables, and detail modals.
-- **Terraform** (`terraform/`): Provisions Hetzner Cloud instances across US, EU, and APAC regions with cloud-init bootstrapping.
-
-## Features
-
-- **Multi-region deployment** — US West (Oregon), EU (Finland), APAC (Singapore) out of the box
-- **Subscription plans** — Standard (100 GB/month) and Premium (1 TB/month) with automatic bandwidth enforcement
-- **Split tunneling** — Predefined bypass rules for Apple, Netflix, Spotify, and YouTube with per-user overrides
-- **Auto node assignment** — Users are assigned to the least-loaded node with automatic IP allocation
-- **Client onboarding** — Device-aware onboarding pages with QR codes for mobile and direct config download
-- **Per-peer bandwidth monitoring** — Real-time tracking with cumulative and interval stats
-- **Admin and per-node authentication** — Bearer tokens with constant-time comparison
-
-## Prerequisites
-
-- Go 1.24+
-- Terraform 1.5+
-- WireGuard tools (`wg`, `wg-quick`) installed locally for development
-- A Hetzner Cloud API token
+A self-hosted WireGuard VPN toolkit. Set up a private VPN server, add peers with one command, and hand out QR codes to your family — no account system, no cloud dependency, no subscription.
 
 ## Quick Start
 
-```bash
-# Build all binaries (api, agent, vpnctl, vpn-tui)
-make all
-
-# Run tests
-make test
-
-# Deploy infrastructure
-export HCLOUD_TOKEN="your-token-here"
-make tf-init
-make tf-plan
-make tf-apply
-```
-
-## Development
+**On your server** (Ubuntu/Debian with a public IP):
 
 ```bash
-# Format Go and Terraform code
-make fmt
+# 1. Install WireGuard
+apt install wireguard wireguard-tools
 
-# Run linter (vet + staticcheck)
-make lint
+# 2. Set up the WireGuard interface
+# (see "Server Setup" below, or use the Hetzner example in examples/hetzner/)
 
-# Run API server locally
-./bin/api -addr :8080 -admin-token mytoken -db vpn.db
+# 3. Build and install
+make build-agent build-ctl
+cp bin/agent bin/vpnctl /usr/local/bin/
 
-# Run agent locally (requires root for WireGuard)
-sudo ./bin/agent -api http://localhost:8080 -node-id node1 -token agenttoken -interface wg0
+# 4. Start the agent
+agent -mode standalone -interface wg0 &
 
-# CLI
-export VPN_API_URL=http://localhost:8080
-export VPN_ADMIN_TOKEN=mytoken
-./bin/vpnctl status
-./bin/vpnctl nodes list
-./bin/vpnctl users create --email user@example.com --plan standard
-
-# TUI dashboard
-./bin/vpn-tui
+# 5. Add your first peer
+vpnctl peer add my-phone
 ```
 
-## Deployment
+That last command generates a WireGuard keypair, allocates an IP, and prints the client config. Scan the QR code or paste the config into the WireGuard app — you're connected.
 
-After provisioning nodes with Terraform:
+## How It Works
+
+```
+┌─────────────┐         ┌──────────────────────────────┐
+│  vpnctl     │ writes  │  /etc/vpn/peers.json         │
+│  (CLI)      │───────→ │  (peer config file)          │
+└─────────────┘         └──────────────┬───────────────┘
+                                       │ watches
+                        ┌──────────────▼───────────────┐
+                        │  agent                       │
+                        │  (standalone mode)            │
+                        │  - syncs WireGuard peers      │
+                        │  - monitors bandwidth         │
+                        └──────────────────────────────┘
+```
+
+The CLI manages a JSON config file. The agent watches it and keeps WireGuard in sync. No database, no API server, no remote calls.
+
+## CLI Commands
+
+### Local commands (standalone mode — no API required)
 
 ```bash
-# Deploy agent binary to all nodes
-./scripts/deploy-agent.sh
+vpnctl peer add <name>       # Add peer, generate keys, show config + QR hint
+vpnctl peer remove <name>    # Remove a peer
+vpnctl peer list             # List all peers
+vpnctl config show <name>    # Show WireGuard client config
+vpnctl qr <name>             # Display QR code in terminal
 ```
 
-The `scripts/setup-node.sh` cloud-init script handles initial node setup: installs WireGuard, enables IP forwarding, configures iptables NAT, sets up UFW (SSH, WireGuard 51820, Agent 8081), and creates the systemd service.
+### Remote commands (managed mode — requires a control plane API)
 
-## API Endpoints
+```bash
+vpnctl status                # System overview
+vpnctl nodes list            # List VPN nodes
+vpnctl users create --email user@example.com
+vpnctl users config <id>     # Show client config
+vpnctl security              # Node security audit
+```
 
-### Public
+Remote commands require `VPN_API_URL` and `VPN_ADMIN_TOKEN` environment variables.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /api/health | Health check |
-| GET | /onboard/{token} | Device-aware onboarding page |
-| GET | /onboard/{token}/config | Download WireGuard config |
-| GET | /onboard/{token}/qr | QR code PNG for mobile |
+## Server Setup
 
-### Admin (Bearer token required)
+### Option A: Quick manual setup
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | /api/users | Create a new user |
-| GET | /api/users | List all users |
-| GET | /api/users/{id} | Get user by ID |
-| DELETE | /api/users/{id} | Delete user and remove peer |
-| GET | /api/users/{id}/config | Get WireGuard config |
-| POST | /api/users/{id}/regen-config | Regenerate config |
-| GET | /api/users/{id}/rules | List user network rules |
-| POST | /api/users/{id}/rules | Add network rule |
-| DELETE | /api/users/{id}/rules/{ruleId} | Remove network rule |
-| GET | /api/users/{id}/bypass | Get user bypass config |
-| PUT | /api/users/{id}/bypass | Set bypass override |
-| GET | /api/bypass/rules | List available bypass rules |
-| POST | /api/nodes | Register a node |
-| GET | /api/nodes | List all nodes |
-| GET | /api/nodes/{id} | Get node details |
-| POST | /api/nodes/{id}/sync | Trigger config sync |
-| GET | /api/nodes/{id}/bandwidth | Get peer bandwidth stats |
+```bash
+# Install WireGuard
+apt update && apt install -y wireguard wireguard-tools
 
-### Node Agent
+# Enable IP forwarding
+echo "net.ipv4.ip_forward = 1" > /etc/sysctl.d/99-wg.conf
+sysctl --system
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | /api/nodes/{id}/bandwidth | Report bandwidth data |
+# Generate server keys
+wg genkey | tee /etc/wireguard/server.key | wg pubkey > /etc/wireguard/server.pub
+chmod 600 /etc/wireguard/server.key
 
-## Configuration
+# Create WireGuard config
+IFACE=$(ip route show default | awk '{print $5}' | head -1)
+cat > /etc/wireguard/wg0.conf << EOF
+[Interface]
+PrivateKey = $(cat /etc/wireguard/server.key)
+Address = 10.0.0.1/24
+ListenPort = 51820
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $IFACE -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $IFACE -j MASQUERADE
+EOF
+chmod 600 /etc/wireguard/wg0.conf
 
-### API Server
+# Start WireGuard
+systemctl enable --now wg-quick@wg0
+```
 
-| Flag / Variable | Description | Default |
-|-----------------|-------------|---------|
-| `-addr` / `LISTEN_ADDR` | HTTP listen address | `:8080` |
-| `-db` / `DB_PATH` | SQLite database path | `vpn.db` |
-| `-admin-token` / `ADMIN_TOKEN` | Admin auth token | auto-generated |
+### Option B: Hetzner Cloud with Terraform
 
-### Node Agent
+```bash
+cd examples/hetzner
+export HCLOUD_TOKEN="your-token"
+terraform init && terraform apply -var ssh_key_name="your-key"
+```
 
-| Flag / Variable | Description | Default |
-|-----------------|-------------|---------|
-| `-api` / `API_URL` | Control plane URL | `http://localhost:8080` |
-| `-node-id` / `NODE_ID` | Node identifier | required |
-| `-token` / `AGENT_TOKEN` | Agent auth token | — |
-| `-interface` / `WG_INTERFACE` | WireGuard interface | `wg0` |
-| `-listen` / `AGENT_LISTEN` | Agent HTTP listen address | `:8081` |
-| `-poll` | Bandwidth poll interval | `30s` |
-| `-report` | Report interval to control plane | `60s` |
+This provisions a server with WireGuard pre-configured via cloud-init.
 
-### CLI / TUI
+## Agent
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `VPN_API_URL` | API server URL | `http://localhost:8080` |
-| `VPN_ADMIN_TOKEN` | Admin auth token | — |
+The agent runs on the VPN server and keeps WireGuard peers in sync with the config file.
 
-## Makefile Targets
+### Standalone mode (default)
 
-| Target | Description |
-|--------|-------------|
-| `make all` | Build all binaries |
-| `make build-api` | Build API server |
-| `make build-agent` | Build node agent |
-| `make build-ctl` | Build CLI tool |
-| `make build-tui` | Build TUI dashboard |
-| `make test` | Run tests with race detection |
-| `make fmt` | Format Go and Terraform code |
-| `make lint` | Run vet and staticcheck |
-| `make clean` | Remove build artifacts |
-| `make tf-init` | Initialize Terraform |
-| `make tf-plan` | Plan infrastructure changes |
-| `make tf-apply` | Apply infrastructure changes |
-| `make tf-destroy` | Destroy infrastructure |
+```bash
+agent -mode standalone -interface wg0
+```
+
+Watches `/etc/vpn/peers.json`, auto-detects the server's public key and endpoint, and syncs WireGuard whenever the config changes.
+
+### Managed mode
+
+For multi-node deployments with a central control plane:
+
+```bash
+agent -mode managed -node-id vpn-us-west -token <token> -api https://api.example.com:8080
+```
+
+### Configuration
+
+| Flag | Env Var | Default | Description |
+|------|---------|---------|-------------|
+| `-mode` | `AGENT_MODE` | `standalone` | `standalone` or `managed` |
+| `-config` | `CONFIG_PATH` | `/etc/vpn/peers.json` | Peer config file path |
+| `-interface` | `WG_INTERFACE` | `wg0` | WireGuard interface |
+| `-listen` | `AGENT_LISTEN` | `:8081` | HTTP status endpoint |
+| `-watch` | — | `2s` | Config watch interval |
+| `-poll` | — | `30s` | Bandwidth poll interval |
+| `-api` | `API_URL` | — | Control plane URL (managed) |
+| `-node-id` | `NODE_ID` | — | Node ID (managed) |
+| `-token` | `AGENT_TOKEN` | — | Auth token |
+
+## Features
+
+- **Single-command peer management** — `vpnctl peer add` handles key generation, IP allocation, and config output
+- **Client-side key generation** — Private keys are generated on the CLI machine and never stored on the server
+- **Split tunneling** — Bypass rules to exclude specific networks from the VPN tunnel
+- **Bandwidth monitoring** — Per-peer traffic stats via `wg show`
+- **QR codes** — Terminal QR output for mobile onboarding
+- **TUI dashboard** — Real-time monitoring with sortable tables and node cards
+
+## Building
+
+```bash
+make all          # Build agent, vpnctl, vpn-tui, and API server
+make build-agent  # Build just the agent
+make build-ctl    # Build just the CLI
+make test         # Run tests with race detection
+make lint         # go vet + staticcheck
+```
+
+Requires Go 1.24+ and WireGuard tools installed.
+
+## Project Structure
+
+```
+cmd/agent/             Agent binary (standalone + managed modes)
+cmd/ctl/               CLI tool (vpnctl)
+cmd/tui/               TUI dashboard
+cmd/api/               Control plane API server (for managed deployments)
+internal/config/       Local peer config file management
+internal/wireguard/    WireGuard key generation, peer sync, split tunneling
+internal/bandwidth/    Per-peer bandwidth monitoring
+internal/api/          API server, handlers, auth, onboarding
+internal/db/           SQLite database (managed mode)
+internal/validate/     Input validation
+examples/hetzner/      Single-node Terraform example
+scripts/               Node setup and deployment scripts
+```
+
+## Security
+
+- Private keys are generated client-side and never sent to or stored on the server
+- WireGuard keys and CIDR inputs are validated before use
+- Agent endpoints require bearer token authentication with constant-time comparison
+- TLS support with auto-generated certificates from an internal CA
+- WIP
 
 ## License
 
-Private. All rights reserved.
+[MIT](LICENSE)

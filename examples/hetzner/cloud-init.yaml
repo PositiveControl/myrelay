@@ -1,0 +1,74 @@
+#cloud-config
+# Single-node VPN setup with WireGuard + standalone agent
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - wireguard
+  - wireguard-tools
+  - ufw
+  - fail2ban
+
+write_files:
+  - path: /etc/sysctl.d/99-wireguard.conf
+    content: |
+      net.ipv4.ip_forward = 1
+      net.ipv4.conf.all.forwarding = 1
+
+runcmd:
+  # Apply sysctl
+  - sysctl --system
+
+  # Generate WireGuard server keys
+  - mkdir -p /etc/wireguard
+  - wg genkey > /etc/wireguard/server.key
+  - chmod 600 /etc/wireguard/server.key
+  - cat /etc/wireguard/server.key | wg pubkey > /etc/wireguard/server.pub
+
+  # Get default network interface for NAT
+  - |
+    DEFAULT_IFACE=$(ip route show default | awk '{print $5}' | head -1)
+    SERVER_KEY=$(cat /etc/wireguard/server.key)
+    cat > /etc/wireguard/wg0.conf << EOF
+    [Interface]
+    PrivateKey = ${SERVER_KEY}
+    Address = 10.0.0.1/24
+    ListenPort = 51820
+    PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o ${DEFAULT_IFACE} -j MASQUERADE
+    PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o ${DEFAULT_IFACE} -j MASQUERADE
+    EOF
+    chmod 600 /etc/wireguard/wg0.conf
+
+  # Enable WireGuard
+  - systemctl enable --now wg-quick@wg0
+
+  # Configure firewall
+  - ufw allow 22/tcp
+  - ufw allow 51820/udp
+  - ufw --force enable
+
+  # Create config directory for the agent
+  - mkdir -p /etc/vpn
+
+  # Install agent and CLI (download latest release or build from source)
+  - mkdir -p /opt/vpn/bin
+
+  # Create systemd service for the agent
+  - |
+    cat > /etc/systemd/system/vpn-agent.service << 'EOF'
+    [Unit]
+    Description=VPN Agent (standalone)
+    After=network.target wg-quick@wg0.service
+    Wants=wg-quick@wg0.service
+
+    [Service]
+    Type=simple
+    ExecStart=/opt/vpn/bin/agent -mode standalone -interface wg0 -config /etc/vpn/peers.json
+    Restart=always
+    RestartSec=5
+
+    [Install]
+    WantedBy=multi-user.target
+    EOF
+    systemctl daemon-reload
