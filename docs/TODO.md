@@ -12,6 +12,8 @@
 - [ ] Restrict SSH in UFW to management IPs (currently open to 0.0.0.0/0)
 - [ ] Apply Terraform firewall changes (`terraform apply` — firewall.tf + variables.tf)
 
+- [ ] Obtain domain and set up browser-trusted TLS (Let's Encrypt / ACME) — current self-signed internal CA causes "Connection Not Private" warnings in browsers
+
 ## Medium Priority
 
 - [ ] Move to client-side WireGuard key generation
