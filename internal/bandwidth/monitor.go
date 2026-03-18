@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/m7s/vpn/internal/wireguard"
+	"github.com/PositiveControl/myrelay/internal/wireguard"
 )
 
 // PeerBandwidth tracks cumulative and delta bandwidth for a single peer.

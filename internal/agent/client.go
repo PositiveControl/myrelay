@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/m7s/vpn/internal/security"
+	"github.com/PositiveControl/myrelay/internal/security"
 )
 
 // Client communicates with VPN node agents to manage WireGuard peers.

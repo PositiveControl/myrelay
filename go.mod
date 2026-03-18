@@ -1,4 +1,4 @@
-module github.com/m7s/vpn
+module github.com/PositiveControl/myrelay
 
 go 1.24.4
 

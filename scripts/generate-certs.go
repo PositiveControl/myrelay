@@ -11,7 +11,7 @@ import (
 	"net"
 	"strings"
 
-	"github.com/m7s/vpn/internal/tlsutil"
+	"github.com/PositiveControl/myrelay/internal/tlsutil"
 )
 
 func main() {

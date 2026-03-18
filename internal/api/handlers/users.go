@@ -11,12 +11,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/m7s/vpn/internal/agent"
-	"github.com/m7s/vpn/internal/db"
-	"github.com/m7s/vpn/internal/httputil"
-	"github.com/m7s/vpn/internal/models"
-	"github.com/m7s/vpn/internal/validate"
-	"github.com/m7s/vpn/internal/wireguard"
+	"github.com/PositiveControl/myrelay/internal/agent"
+	"github.com/PositiveControl/myrelay/internal/db"
+	"github.com/PositiveControl/myrelay/internal/httputil"
+	"github.com/PositiveControl/myrelay/internal/models"
+	"github.com/PositiveControl/myrelay/internal/validate"
+	"github.com/PositiveControl/myrelay/internal/wireguard"
 )
 
 // UserHandler handles HTTP requests for user management.

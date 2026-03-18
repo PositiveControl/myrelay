@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
-	"github.com/m7s/vpn/internal/tlsutil"
+	"github.com/PositiveControl/myrelay/internal/tlsutil"
 	"github.com/rivo/tview"
 )
 

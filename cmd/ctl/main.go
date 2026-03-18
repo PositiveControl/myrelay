@@ -13,8 +13,8 @@ import (
 
 	qrcode "github.com/skip2/go-qrcode"
 
-	"github.com/m7s/vpn/internal/config"
-	"github.com/m7s/vpn/internal/wireguard"
+	"github.com/PositiveControl/myrelay/internal/config"
+	"github.com/PositiveControl/myrelay/internal/wireguard"
 )
 
 var (

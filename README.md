@@ -1,4 +1,4 @@
-# VPN
+# MyRelay
 
 A self-hosted WireGuard VPN toolkit. Set up a private VPN server, add peers with one command, and hand out QR codes to your family — no account system, no cloud dependency, no subscription.
 

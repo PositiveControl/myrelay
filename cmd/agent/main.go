@@ -14,12 +14,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/m7s/vpn/internal/bandwidth"
-	"github.com/m7s/vpn/internal/config"
-	"github.com/m7s/vpn/internal/security"
-	"github.com/m7s/vpn/internal/tlsutil"
-	"github.com/m7s/vpn/internal/validate"
-	"github.com/m7s/vpn/internal/wireguard"
+	"github.com/PositiveControl/myrelay/internal/bandwidth"
+	"github.com/PositiveControl/myrelay/internal/config"
+	"github.com/PositiveControl/myrelay/internal/security"
+	"github.com/PositiveControl/myrelay/internal/tlsutil"
+	"github.com/PositiveControl/myrelay/internal/validate"
+	"github.com/PositiveControl/myrelay/internal/wireguard"
 )
 
 func main() {
