@@ -1,18 +1,27 @@
 // +build ignore
 
 // Generates server TLS certificates for VPN nodes using the project CA.
-// Usage: go run scripts/generate-certs.go
+// Usage: go run scripts/generate-certs.go -nodes "node1=1.2.3.4,node2=5.6.7.8"
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"net"
+	"strings"
 
 	"github.com/m7s/vpn/internal/tlsutil"
 )
 
 func main() {
+	nodesFlag := flag.String("nodes", "", "Comma-separated node=ip pairs (e.g., node1=1.2.3.4,node2=5.6.7.8)")
+	flag.Parse()
+
+	if *nodesFlag == "" {
+		log.Fatal("Usage: go run scripts/generate-certs.go -nodes \"node1=1.2.3.4,node2=5.6.7.8\"")
+	}
+
 	caCertPath := "certs/ca.crt"
 	caKeyPath := "certs/ca.key"
 
@@ -22,27 +31,25 @@ func main() {
 	}
 	fmt.Println("CA loaded from", caCertPath)
 
-	nodes := []struct {
-		name string
-		ip   string
-	}{
-		{"vpn-us-west", "5.78.83.247"},
-		{"vpn-ap-sgp", "5.223.70.143"},
-	}
+	for _, entry := range strings.Split(*nodesFlag, ",") {
+		parts := strings.SplitN(strings.TrimSpace(entry), "=", 2)
+		if len(parts) != 2 {
+			log.Fatalf("Invalid node entry %q: expected name=ip", entry)
+		}
+		name, ip := parts[0], parts[1]
 
-	for _, node := range nodes {
-		certPath := fmt.Sprintf("certs/%s.crt", node.name)
-		keyPath := fmt.Sprintf("certs/%s.key", node.name)
+		certPath := fmt.Sprintf("certs/%s.crt", name)
+		keyPath := fmt.Sprintf("certs/%s.key", name)
 
 		ips := []net.IP{
-			net.ParseIP(node.ip),
+			net.ParseIP(ip),
 			net.ParseIP("127.0.0.1"),
 		}
 
 		if err := tlsutil.SaveServerCert(ca, caKey, ips, certPath, keyPath); err != nil {
-			log.Fatalf("Failed to generate cert for %s: %v", node.name, err)
+			log.Fatalf("Failed to generate cert for %s: %v", name, err)
 		}
-		fmt.Printf("Generated cert for %s (%s) -> %s, %s\n", node.name, node.ip, certPath, keyPath)
+		fmt.Printf("Generated cert for %s (%s) -> %s, %s\n", name, ip, certPath, keyPath)
 	}
 
 	fmt.Println("\nDone. Copy certs to nodes during deployment.")

@@ -17,7 +17,7 @@ import (
 type Client struct {
 	httpClient *http.Client
 	mu         sync.RWMutex
-	// nodeAgents maps node ID -> agent base URL (e.g., "https://5.78.83.247:8081")
+	// nodeAgents maps node ID -> agent base URL (e.g., "https://203.0.113.1:8081")
 	nodeAgents map[string]string
 	// nodeTokens maps node ID -> agent token
 	nodeTokens map[string]string
