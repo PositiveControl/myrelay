@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -14,6 +16,7 @@ import (
 	qrcode "github.com/skip2/go-qrcode"
 
 	"github.com/PositiveControl/myrelay/internal/config"
+	"github.com/PositiveControl/myrelay/pkg/tlsutil"
 	"github.com/PositiveControl/myrelay/pkg/wireguard"
 )
 
@@ -28,6 +31,19 @@ func main() {
 	apiURL = envOrDefault("VPN_API_URL", "")
 	token = envOrDefault("VPN_ADMIN_TOKEN", "")
 	configPath = envOrDefault("VPN_CONFIG", config.DefaultPath)
+
+	// Configure TLS for HTTPS API URLs.
+	if caPath := os.Getenv("TLS_CA_CERT"); caPath != "" {
+		tlsCfg, err := tlsutil.ClientTLSConfig(caPath)
+		if err != nil {
+			fatal("Failed to load CA cert %s: %v", caPath, err)
+		}
+		client.Transport = &http.Transport{TLSClientConfig: tlsCfg}
+	} else if strings.HasPrefix(apiURL, "https://") {
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+	}
 
 	if len(os.Args) < 2 {
 		printUsage()
@@ -140,6 +156,9 @@ func main() {
 		default:
 			cmdUsersGet(args[0])
 		}
+	case "api":
+		requireAPI()
+		cmdAPI(args)
 	case "security":
 		requireAPI()
 		if len(args) == 0 {
@@ -183,6 +202,8 @@ Remote commands (managed mode — requires VPN_API_URL):
   users rules <id> rm    Remove a bypass rule
   users config <id>      Regenerate WireGuard client config
   users regen <id>       Regenerate config + new onboarding link
+  api <METHOD> <path>    Call any API endpoint (e.g. api GET /api/nodes)
+      [--data <json>]    Request body (for POST/PUT/PATCH)
   security               Show security status for all nodes
   security <node_id>     Show security status for a specific node
 
@@ -695,6 +716,87 @@ func cmdUsersConfig(userID string) {
 	if cfg, ok := result["config"].(string); ok {
 		fmt.Println(cfg)
 	}
+}
+
+// --- Generic API ---
+
+func cmdAPI(args []string) {
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "Usage: vpnctl api <METHOD> <path> [--data <json>]")
+		os.Exit(1)
+	}
+
+	method := strings.ToUpper(args[0])
+	switch method {
+	case "GET", "POST", "PUT", "DELETE", "PATCH":
+	default:
+		fatal("Invalid HTTP method: %s (must be GET, POST, PUT, DELETE, or PATCH)", method)
+	}
+
+	path := args[1]
+	if err := validateAPIPath(path); err != nil {
+		fatal("Invalid path: %v", err)
+	}
+
+	var body string
+	for i := 2; i < len(args)-1; i++ {
+		if args[i] == "--data" {
+			body = args[i+1]
+			break
+		}
+	}
+
+	if body != "" {
+		if !json.Valid([]byte(body)) {
+			fatal("Invalid JSON in --data: %s", body)
+		}
+	}
+
+	u, err := url.JoinPath(apiURL, path)
+	if err != nil {
+		fatal("Failed to build URL: %v", err)
+	}
+
+	var reqBody io.Reader
+	if body != "" {
+		reqBody = strings.NewReader(body)
+	}
+
+	req, err := http.NewRequest(method, u, reqBody)
+	if err != nil {
+		fatal("Failed to create request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		fatal("API request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if len(respBody) > 0 {
+		printJSON(respBody)
+	}
+
+	if resp.StatusCode >= 400 {
+		fmt.Fprintf(os.Stderr, "\nHTTP %d %s\n", resp.StatusCode, http.StatusText(resp.StatusCode))
+		os.Exit(1)
+	}
+}
+
+func validateAPIPath(path string) error {
+	if strings.Contains(path, "://") {
+		return fmt.Errorf("absolute URLs are not allowed — use a path like /api/nodes")
+	}
+	if !strings.HasPrefix(path, "/api/") {
+		return fmt.Errorf("path must start with /api/ (got %q)", path)
+	}
+	return nil
 }
 
 // --- HTTP helpers ---
