@@ -1,9 +1,8 @@
-# MyRelay
+# MyRelay (OSS)
 
-WireGuard VPN toolkit split into two products under one brand:
+Open-source, self-hosted WireGuard VPN toolkit (MIT). See `CLAUDE-oss.md` for full details.
 
-1. **OSS** (MIT) — Self-hosted single-node VPN. See `CLAUDE-oss.md`.
-2. **SaaS** (proprietary) — Managed multi-node service. See `CLAUDE-saas.md`.
+The SaaS product (proprietary) lives in a separate repo: `github.com/PositiveControl/myrelay-cloud` (locally at `../myrelay-cloud`). The SaaS repo depends on this one for shared packages.
 
 ## Brand
 
@@ -15,44 +14,32 @@ WireGuard VPN toolkit split into two products under one brand:
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    OSS (MIT)                         │
-│                                                     │
-│  cmd/agent/      Agent (standalone + managed modes) │
-│  cmd/ctl/        CLI (local peer mgmt + API client) │
-│  cmd/tui/        TUI dashboard                      │
-│  internal/config/     Local peer config file         │
-│  internal/wireguard/  Key gen, peer sync, split tun  │
-│  internal/bandwidth/  Per-peer traffic monitoring    │
-│  internal/validate/   Input validation               │
-│  internal/models/     Data models                    │
-│  internal/security/   Node security auditing         │
-│  internal/tlsutil/    TLS cert generation            │
-│  internal/httputil/   HTTP response helpers          │
-│  examples/            Single-node Terraform example  │
-│  scripts/setup-node.sh  Cloud-init bootstrap         │
-├─────────────────────────────────────────────────────┤
-│                    SaaS (proprietary)                │
-│                                                     │
-│  cmd/api/             Control plane API server       │
-│  internal/api/        Handlers, auth, onboarding     │
-│  internal/agent/      API→node client (managed mode) │
-│  internal/db/         SQLite multi-user database     │
-│  terraform/           Multi-node Hetzner infra       │
-│  scripts/deploy.sh    Cluster deployment pipeline    │
-│  scripts/deploy-all.sh  Legacy deploy (TLS)          │
-│  scripts/deploy-agent.sh  Agent-only deploy          │
-│  scripts/generate-certs.go  TLS cert generation      │
-│  docs/                Internal docs and TODOs        │
-└─────────────────────────────────────────────────────┘
+cmd/agent/           Agent (standalone + managed modes)
+cmd/ctl/             CLI (local peer mgmt + generic API client)
+cmd/tui/             TUI dashboard
+internal/config/     Local peer config file
+pkg/wireguard/       Key gen, peer sync, split tunneling
+pkg/bandwidth/       Per-peer traffic monitoring
+pkg/validate/        Input validation
+pkg/models/          Data models
+pkg/security/        Node security auditing
+pkg/tlsutil/         TLS cert generation
+pkg/httputil/        HTTP response helpers
+examples/            Single-node Terraform example
+scripts/setup-node.sh  Cloud-init bootstrap
 ```
+
+## Roles
+
+- **Admin** — runs a single node, manages peers directly via `vpnctl peer`.
+- In SaaS context: the agent runs in managed mode and peers are managed by the user (customer) inside their isolated pod. See myrelay-cloud docs.
 
 ## Key Rules
 
 - Never commit secrets, IPs, tokens, or personal info to tracked files.
 - `.env`, `certs/`, `*.tfstate`, `terraform.tfvars` are gitignored.
-- The OSS branch is `feat/oss-standalone`. Main is the SaaS/managed codebase.
-- When editing shared packages (wireguard, bandwidth, models, validate), changes affect both products.
+- Shared packages (`pkg/`) are imported by both this repo and myrelay-cloud. Changes here affect both.
+- The CLI includes a generic `vpnctl api` subcommand for calling any SaaS API endpoint without hardcoding SaaS-specific commands.
 
 ## Build
 
