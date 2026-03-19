@@ -41,12 +41,11 @@ func main() {
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	if err := validate.InterfaceName(*iface); err != nil {
-		log.Fatalf("invalid interface name: %v", err)
-	}
-
 	switch *mode {
 	case "standalone":
+		if err := validate.InterfaceName(*iface); err != nil {
+			log.Fatalf("invalid interface name: %v", err)
+		}
 		runStandalone(*iface, *configPath, *watchInterval, *pollInterval, *listenAddr, *agentToken, *tlsCert, *tlsKey)
 	case "managed":
 		runManaged(*iface, *apiURL, *nodeID, *agentToken, *listenAddr, *tlsCert, *tlsKey, *tlsCACert, *pollInterval, *reportInterval)
@@ -243,16 +242,20 @@ func runManaged(iface, apiURL, nodeID, agentToken, listenAddr, tlsCert, tlsKey, 
 		log.Fatal("agent token is required in managed mode (set via -token flag or AGENT_TOKEN env var)")
 	}
 
-	log.Printf("Starting agent in managed mode for node %s on interface %s", nodeID, iface)
+	log.Printf("Starting agent in managed mode for node %s", nodeID)
 	log.Printf("Control plane: %s", apiURL)
 
-	// Start bandwidth monitoring.
-	mon := bandwidth.NewMonitor(iface, pollInterval)
-	mon.Start()
-	defer mon.Stop()
+	statePath := envOrDefault("AGENT_STATE_PATH", "/var/lib/myrelay/interfaces.json")
+	mgr := NewInterfaceManager(agentToken, pollInterval, statePath)
+
+	// Backward compat: if --interface is explicitly set (not the default "wg0"),
+	// log that legacy single-interface mode is available but don't auto-create.
+	if iface != "wg0" {
+		log.Printf("Legacy --interface flag set to %s (interfaces are now managed dynamically)", iface)
+	}
 
 	// Start the agent HTTP server for peer management.
-	agentSrv := newManagedServer(listenAddr, iface, agentToken, tlsCert)
+	agentSrv := newManagedServer(listenAddr, agentToken, tlsCert, mgr)
 	go func() {
 		if tlsCert != "" && tlsKey != "" {
 			log.Printf("Agent HTTPS server listening on %s", listenAddr)
@@ -279,14 +282,18 @@ func runManaged(iface, apiURL, nodeID, agentToken, listenAddr, tlsCert, tlsKey, 
 	for {
 		select {
 		case <-reportTicker.C:
-			peers := mon.GetAllPeers()
-			if len(peers) == 0 {
+			bw := mgr.GetAllBandwidth()
+			if len(bw) == 0 {
 				continue
 			}
-			if err := reportBandwidth(apiURL, nodeID, agentToken, tlsCACert, peers); err != nil {
+			if err := reportBandwidthMulti(apiURL, nodeID, agentToken, tlsCACert, bw); err != nil {
 				log.Printf("Failed to report bandwidth: %v", err)
 			} else {
-				log.Printf("Reported bandwidth for %d peers", len(peers))
+				total := 0
+				for _, peers := range bw {
+					total += len(peers)
+				}
+				log.Printf("Reported bandwidth for %d interfaces (%d peers)", len(bw), total)
 			}
 		case sig := <-sigCh:
 			log.Printf("Received signal %s, shutting down", sig)
@@ -295,16 +302,17 @@ func runManaged(iface, apiURL, nodeID, agentToken, listenAddr, tlsCert, tlsKey, 
 	}
 }
 
-// newManagedServer creates the HTTP server for managed mode (peer add/remove from control plane).
-func newManagedServer(addr, iface, token, tlsCertFile string) *http.Server {
+// newManagedServer creates the HTTP server for managed mode with multi-interface support.
+func newManagedServer(addr, adminToken, tlsCertFile string, mgr *InterfaceManager) *http.Server {
 	tlsEnabled := tlsCertFile != ""
 	mux := http.NewServeMux()
 
-	requireToken := func(next http.HandlerFunc) http.HandlerFunc {
+	// requireAdmin checks that the request carries the admin token.
+	requireAdmin := func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			h := r.Header.Get("Authorization")
 			provided := strings.TrimPrefix(h, "Bearer ")
-			if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
+			if subtle.ConstantTimeCompare([]byte(provided), []byte(adminToken)) != 1 {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
@@ -312,10 +320,40 @@ func newManagedServer(addr, iface, token, tlsCertFile string) *http.Server {
 		}
 	}
 
-	mux.HandleFunc("POST /peers", requireToken(handleAddPeer(iface)))
-	mux.HandleFunc("POST /peers/remove", requireToken(handleRemovePeer(iface)))
-	mux.HandleFunc("GET /peers", requireToken(handleListPeers(iface)))
-	mux.HandleFunc("GET /security", requireToken(func(w http.ResponseWriter, r *http.Request) {
+	// requireAccess checks admin token OR a user token matching the {iface} path value.
+	requireAccess := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			h := r.Header.Get("Authorization")
+			provided := strings.TrimPrefix(h, "Bearer ")
+
+			scope, ifaceName, ok := mgr.Authorize(provided)
+			if !ok {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+
+			pathIface := r.PathValue("iface")
+			if scope == "user" && ifaceName != pathIface {
+				http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+				return
+			}
+
+			next(w, r)
+		}
+	}
+
+	// Admin-only: interface lifecycle.
+	mux.HandleFunc("POST /interfaces", requireAdmin(handleCreateInterface(mgr)))
+	mux.HandleFunc("DELETE /interfaces/{iface}", requireAdmin(handleDestroyInterface(mgr)))
+	mux.HandleFunc("GET /interfaces", requireAdmin(handleListInterfaces(mgr)))
+
+	// Per-interface: peer management (admin or matching user token).
+	mux.HandleFunc("POST /interfaces/{iface}/peers", requireAccess(handleAddPeerManaged(mgr)))
+	mux.HandleFunc("POST /interfaces/{iface}/peers/remove", requireAccess(handleRemovePeerManaged(mgr)))
+	mux.HandleFunc("GET /interfaces/{iface}/peers", requireAccess(handleListPeersManaged(mgr)))
+
+	// Global routes.
+	mux.HandleFunc("GET /security", requireAdmin(func(w http.ResponseWriter, r *http.Request) {
 		status := security.Collect(tlsEnabled, tlsCertFile)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(status)
@@ -333,13 +371,108 @@ func newManagedServer(addr, iface, token, tlsCertFile string) *http.Server {
 	}
 }
 
+// --- Interface lifecycle handlers (admin-only) ---
+
+type createInterfaceRequest struct {
+	Name       string `json:"name"`
+	ListenPort int    `json:"listen_port"`
+	Address    string `json:"address"`
+	UserToken  string `json:"user_token"`
+}
+
+func handleCreateInterface(mgr *InterfaceManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req createInterfaceRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			return
+		}
+		if req.Name == "" || req.Address == "" || req.UserToken == "" {
+			http.Error(w, `{"error":"name, address, and user_token required"}`, http.StatusBadRequest)
+			return
+		}
+		if err := validate.InterfaceName(req.Name); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+			return
+		}
+		if err := validate.ListenPort(req.ListenPort); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+			return
+		}
+		if err := validate.CIDR(req.Address); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"invalid address: %s"}`, err.Error()), http.StatusBadRequest)
+			return
+		}
+
+		info, err := mgr.CreateInterface(req.Name, req.ListenPort, req.Address, req.UserToken)
+		if err != nil {
+			log.Printf("Failed to create interface %s: %v", req.Name, err)
+			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+
+		endpoint, _ := wireguard.ReadServerEndpoint(req.Name)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{
+			"name":       info.Name,
+			"public_key": info.PublicKey,
+			"endpoint":   endpoint,
+		})
+	}
+}
+
+func handleDestroyInterface(mgr *InterfaceManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("iface")
+		if err := mgr.DestroyInterface(name); err != nil {
+			log.Printf("Failed to destroy interface %s: %v", name, err)
+			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func handleListInterfaces(mgr *InterfaceManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ifaces := mgr.List()
+		type ifaceResponse struct {
+			Name       string `json:"name"`
+			ListenPort int    `json:"listen_port"`
+			Address    string `json:"address"`
+			PublicKey  string `json:"public_key"`
+		}
+		result := make([]ifaceResponse, len(ifaces))
+		for i, info := range ifaces {
+			result[i] = ifaceResponse{
+				Name:       info.Name,
+				ListenPort: info.ListenPort,
+				Address:    info.Address,
+				PublicKey:  info.PublicKey,
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+	}
+}
+
+// --- Per-interface peer handlers (admin or matching user token) ---
+
 type addPeerRequest struct {
 	PublicKey  string `json:"public_key"`
 	AllowedIPs string `json:"allowed_ips"`
 }
 
-func handleAddPeer(iface string) http.HandlerFunc {
+func handleAddPeerManaged(mgr *InterfaceManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		iface := r.PathValue("iface")
+		if _, ok := mgr.Get(iface); !ok {
+			http.Error(w, `{"error":"interface not found"}`, http.StatusNotFound)
+			return
+		}
+
 		var req addPeerRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
@@ -359,12 +492,12 @@ func handleAddPeer(iface string) http.HandlerFunc {
 		}
 
 		if err := wireguard.SyncPeers(iface, req.PublicKey, req.AllowedIPs, false); err != nil {
-			log.Printf("Failed to add peer %s: %v", req.PublicKey, err)
+			log.Printf("Failed to add peer %s on %s: %v", req.PublicKey, iface, err)
 			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
 			return
 		}
 
-		log.Printf("Added peer %s with allowed IPs %s", req.PublicKey, req.AllowedIPs)
+		log.Printf("Added peer %s on %s with allowed IPs %s", req.PublicKey, iface, req.AllowedIPs)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprintf(w, `{"status":"added","public_key":"%s"}`, req.PublicKey)
@@ -375,8 +508,14 @@ type removePeerRequest struct {
 	PublicKey string `json:"public_key"`
 }
 
-func handleRemovePeer(iface string) http.HandlerFunc {
+func handleRemovePeerManaged(mgr *InterfaceManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		iface := r.PathValue("iface")
+		if _, ok := mgr.Get(iface); !ok {
+			http.Error(w, `{"error":"interface not found"}`, http.StatusNotFound)
+			return
+		}
+
 		var req removePeerRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.PublicKey == "" {
 			http.Error(w, `{"error":"public_key required"}`, http.StatusBadRequest)
@@ -388,18 +527,24 @@ func handleRemovePeer(iface string) http.HandlerFunc {
 		}
 
 		if err := wireguard.SyncPeers(iface, req.PublicKey, "", true); err != nil {
-			log.Printf("Failed to remove peer %s: %v", req.PublicKey, err)
+			log.Printf("Failed to remove peer %s on %s: %v", req.PublicKey, iface, err)
 			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
 			return
 		}
 
-		log.Printf("Removed peer %s", req.PublicKey)
+		log.Printf("Removed peer %s on %s", req.PublicKey, iface)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
-func handleListPeers(iface string) http.HandlerFunc {
+func handleListPeersManaged(mgr *InterfaceManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		iface := r.PathValue("iface")
+		if _, ok := mgr.Get(iface); !ok {
+			http.Error(w, `{"error":"interface not found"}`, http.StatusNotFound)
+			return
+		}
+
 		out, err := wireguard.ShowPeers(iface)
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
@@ -410,10 +555,12 @@ func handleListPeers(iface string) http.HandlerFunc {
 	}
 }
 
-func reportBandwidth(apiURL, nodeID, token, caCertPath string, peers []bandwidth.PeerBandwidth) error {
+// --- Bandwidth reporting ---
+
+func reportBandwidthMulti(apiURL, nodeID, token, caCertPath string, interfaces map[string][]bandwidth.PeerBandwidth) error {
 	payload := map[string]any{
-		"node_id": nodeID,
-		"peers":   peers,
+		"node_id":    nodeID,
+		"interfaces": interfaces,
 	}
 
 	body, err := json.Marshal(payload)

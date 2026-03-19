@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"net"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -124,6 +126,83 @@ func ParseWgShow(output string) ([]PeerTransfer, error) {
 	}
 
 	return peers, nil
+}
+
+// CreateInterface creates a WireGuard interface, generates a keypair,
+// assigns an address, and brings it up. Returns the public key.
+func CreateInterface(name string, listenPort int, address string) (string, error) {
+	// Create the interface.
+	if out, err := exec.Command("ip", "link", "add", name, "type", "wireguard").CombinedOutput(); err != nil {
+		return "", fmt.Errorf("ip link add %s: %s: %w", name, string(out), err)
+	}
+
+	// Generate keypair.
+	kp, err := GenerateKeyPair()
+	if err != nil {
+		// Clean up the interface we just created.
+		_ = exec.Command("ip", "link", "delete", name).Run()
+		return "", fmt.Errorf("generate keypair: %w", err)
+	}
+
+	// Write private key to a temp file with restricted permissions.
+	tmpFile := fmt.Sprintf("/tmp/wg-privkey-%s", name)
+	if err := os.WriteFile(tmpFile, []byte(kp.PrivateKey), 0600); err != nil {
+		_ = exec.Command("ip", "link", "delete", name).Run()
+		return "", fmt.Errorf("write private key: %w", err)
+	}
+	defer os.Remove(tmpFile)
+
+	// Configure WireGuard with private key and listen port.
+	if out, err := exec.Command("wg", "set", name, "private-key", tmpFile, "listen-port", strconv.Itoa(listenPort)).CombinedOutput(); err != nil {
+		_ = exec.Command("ip", "link", "delete", name).Run()
+		return "", fmt.Errorf("wg set %s: %s: %w", name, string(out), err)
+	}
+
+	// Assign address.
+	if out, err := exec.Command("ip", "addr", "add", address, "dev", name).CombinedOutput(); err != nil {
+		_ = exec.Command("ip", "link", "delete", name).Run()
+		return "", fmt.Errorf("ip addr add %s: %s: %w", address, string(out), err)
+	}
+
+	// Bring interface up.
+	if out, err := exec.Command("ip", "link", "set", name, "up").CombinedOutput(); err != nil {
+		_ = exec.Command("ip", "link", "delete", name).Run()
+		return "", fmt.Errorf("ip link set %s up: %s: %w", name, string(out), err)
+	}
+
+	// Extract subnet from address for NAT rule.
+	_, subnet, err := net.ParseCIDR(address)
+	if err == nil {
+		_ = exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", subnet.String(), "-o", "eth0", "-j", "MASQUERADE").Run()
+	}
+
+	return kp.PublicKey, nil
+}
+
+// DestroyInterface tears down a WireGuard interface and cleans up NAT rules.
+func DestroyInterface(name string, subnet string) error {
+	// Remove NAT rule (best-effort).
+	_ = exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", subnet, "-o", "eth0", "-j", "MASQUERADE").Run()
+
+	// Delete the interface.
+	if out, err := exec.Command("ip", "link", "delete", name).CombinedOutput(); err != nil {
+		return fmt.Errorf("ip link delete %s: %s: %w", name, string(out), err)
+	}
+	return nil
+}
+
+// ListInterfaces returns active WireGuard interface names.
+func ListInterfaces() ([]string, error) {
+	cmd := exec.Command("wg", "show", "interfaces")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("wg show interfaces: %w", err)
+	}
+	raw := strings.TrimSpace(string(out))
+	if raw == "" {
+		return nil, nil
+	}
+	return strings.Fields(raw), nil
 }
 
 // PeerInfo holds summary info about a configured peer.

@@ -42,6 +42,14 @@ func InterfaceName(name string) error {
 	return nil
 }
 
+// ListenPort validates a WireGuard listen port (1024-65535).
+func ListenPort(port int) error {
+	if port < 1024 || port > 65535 {
+		return fmt.Errorf("listen port must be between 1024 and 65535, got %d", port)
+	}
+	return nil
+}
+
 // IP validates an IP address string.
 func IP(ip string) error {
 	if net.ParseIP(ip) == nil {
