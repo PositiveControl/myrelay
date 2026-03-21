@@ -1,4 +1,6 @@
 # Go
+/agent
+/tui
 /bin/
 *.exe
 *.exe~
