@@ -393,7 +393,7 @@ type createInterfaceRequest struct {
 func handleCreateInterface(mgr *InterfaceManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req createInterfaceRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
 			return
 		}
@@ -484,7 +484,7 @@ func handleAddPeerManaged(mgr *InterfaceManager) http.HandlerFunc {
 		}
 
 		var req addPeerRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
 			return
 		}
@@ -527,7 +527,7 @@ func handleRemovePeerManaged(mgr *InterfaceManager) http.HandlerFunc {
 		}
 
 		var req removePeerRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.PublicKey == "" {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil || req.PublicKey == "" {
 			http.Error(w, `{"error":"public_key required"}`, http.StatusBadRequest)
 			return
 		}
