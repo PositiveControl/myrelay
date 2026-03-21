@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/subtle"
 	"encoding/json"
 	"flag"
@@ -103,7 +104,12 @@ func runStandalone(iface, configPath string, watchInterval, pollInterval time.Du
 
 	// Start HTTP server for local status queries.
 	if agentToken == "" {
-		agentToken = "standalone"
+		b := make([]byte, 16)
+		if _, err := rand.Read(b); err != nil {
+			log.Fatalf("Failed to generate agent token: %v", err)
+		}
+		agentToken = fmt.Sprintf("%x", b)
+		log.Printf("No agent token configured — generated one: %s", agentToken)
 	}
 	srv := newStandaloneServer(listenAddr, iface, agentToken, tlsCert, mon, cfg)
 	go func() {
