@@ -32,7 +32,7 @@ scripts/setup-node.sh  Cloud-init bootstrap
 ## Roles
 
 - **Admin** — runs a single node, manages peers directly via `vpnctl peer`.
-- In SaaS context: the agent runs in managed mode and peers are managed by the user (customer) inside their isolated pod. See myrelay-cloud docs.
+- In SaaS context: each customer gets a dedicated node running the agent in standalone mode. Customers manage their own peers. See myrelay-cloud docs.
 
 ## Key Rules
 
