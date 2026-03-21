@@ -9,10 +9,15 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 
 	"github.com/PositiveControl/myrelay/pkg/validate"
 )
+
+// wgMu serializes all WireGuard command executions to prevent
+// inconsistent state from concurrent wg set / wg-quick calls.
+var wgMu sync.Mutex
 
 // KeyPair holds a WireGuard private and public key.
 type KeyPair struct {
@@ -161,6 +166,9 @@ func CreateInterface(name string, listenPort int, address string) (string, error
 		return "", fmt.Errorf("invalid address: %w", err)
 	}
 
+	wgMu.Lock()
+	defer wgMu.Unlock()
+
 	// Create the interface.
 	if out, err := exec.Command("ip", "link", "add", name, "type", "wireguard").CombinedOutput(); err != nil {
 		return "", fmt.Errorf("ip link add %s: %s: %w", name, string(out), err)
@@ -217,6 +225,9 @@ func DestroyInterface(name string, subnet string) error {
 	if err := validate.CIDR(subnet); err != nil {
 		return fmt.Errorf("invalid subnet: %w", err)
 	}
+
+	wgMu.Lock()
+	defer wgMu.Unlock()
 
 	// Remove NAT rule (best-effort).
 	_ = exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", subnet, "-o", "eth0", "-j", "MASQUERADE").Run()
@@ -297,6 +308,9 @@ func ApplyConfig(interfaceName, configPath string) error {
 	if err := validate.InterfaceName(interfaceName); err != nil {
 		return fmt.Errorf("invalid interface name: %w", err)
 	}
+	wgMu.Lock()
+	defer wgMu.Unlock()
+
 	// Bring down existing interface (ignore error if not up)
 	downCmd := exec.Command("wg-quick", "down", interfaceName)
 	_ = downCmd.Run()
@@ -361,6 +375,9 @@ func SyncPeers(interfaceName string, publicKey string, allowedIPs string, remove
 	if err := validate.WireGuardKey(publicKey); err != nil {
 		return fmt.Errorf("invalid public key: %w", err)
 	}
+
+	wgMu.Lock()
+	defer wgMu.Unlock()
 
 	if remove {
 		cmd := exec.Command("wg", "set", interfaceName, "peer", publicKey, "remove")

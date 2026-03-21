@@ -417,7 +417,7 @@ func handleCreateInterface(mgr *InterfaceManager) http.HandlerFunc {
 		info, err := mgr.CreateInterface(req.Name, req.ListenPort, req.Address, req.UserToken)
 		if err != nil {
 			log.Printf("Failed to create interface %s: %v", req.Name, err)
-			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+			http.Error(w, `{"error":"failed to create interface"}`, http.StatusInternalServerError)
 			return
 		}
 
@@ -438,7 +438,7 @@ func handleDestroyInterface(mgr *InterfaceManager) http.HandlerFunc {
 		name := r.PathValue("iface")
 		if err := mgr.DestroyInterface(name); err != nil {
 			log.Printf("Failed to destroy interface %s: %v", name, err)
-			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+			http.Error(w, `{"error":"failed to destroy interface"}`, http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -503,7 +503,7 @@ func handleAddPeerManaged(mgr *InterfaceManager) http.HandlerFunc {
 
 		if err := wireguard.SyncPeers(iface, req.PublicKey, req.AllowedIPs, false); err != nil {
 			log.Printf("Failed to add peer %s on %s: %v", req.PublicKey, iface, err)
-			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+			http.Error(w, `{"error":"failed to add peer"}`, http.StatusInternalServerError)
 			return
 		}
 
@@ -538,7 +538,7 @@ func handleRemovePeerManaged(mgr *InterfaceManager) http.HandlerFunc {
 
 		if err := wireguard.SyncPeers(iface, req.PublicKey, "", true); err != nil {
 			log.Printf("Failed to remove peer %s on %s: %v", req.PublicKey, iface, err)
-			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+			http.Error(w, `{"error":"failed to remove peer"}`, http.StatusInternalServerError)
 			return
 		}
 
@@ -557,7 +557,7 @@ func handleListPeersManaged(mgr *InterfaceManager) http.HandlerFunc {
 
 		out, err := wireguard.ShowPeers(iface)
 		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+			http.Error(w, `{"error":"failed to list peers"}`, http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
