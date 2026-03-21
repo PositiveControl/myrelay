@@ -35,6 +35,7 @@ func main() {
 	tlsCert := flag.String("tls-cert", envOrDefault("TLS_CERT_FILE", ""), "TLS certificate file")
 	tlsKey := flag.String("tls-key", envOrDefault("TLS_KEY_FILE", ""), "TLS key file")
 	tlsCACert := flag.String("tls-ca-cert", envOrDefault("TLS_CA_CERT", ""), "CA certificate for verifying API server (managed mode)")
+	insecure := flag.Bool("insecure", envOrDefault("INSECURE", "") == "true", "Allow running without TLS (dangerous)")
 	pollInterval := flag.Duration("poll", 30*time.Second, "Bandwidth poll interval")
 	reportInterval := flag.Duration("report", 60*time.Second, "Report interval to control plane (managed mode)")
 	flag.Parse()
@@ -48,6 +49,9 @@ func main() {
 		}
 		runStandalone(*iface, *configPath, *watchInterval, *pollInterval, *listenAddr, *agentToken, *tlsCert, *tlsKey)
 	case "managed":
+		if *tlsCert == "" && !*insecure {
+			log.Fatal("TLS is not configured. Provide --tls-cert and --tls-key. Use --insecure to override (dangerous).")
+		}
 		runManaged(*iface, *apiURL, *nodeID, *agentToken, *listenAddr, *tlsCert, *tlsKey, *tlsCACert, *pollInterval, *reportInterval)
 	default:
 		log.Fatalf("unknown mode %q: must be 'standalone' or 'managed'", *mode)

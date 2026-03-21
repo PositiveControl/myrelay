@@ -40,9 +40,12 @@ func main() {
 		}
 		client.Transport = &http.Transport{TLSClientConfig: tlsCfg}
 	} else if strings.HasPrefix(apiURL, "https://") {
+		fmt.Fprintln(os.Stderr, "Warning: using HTTPS without TLS_CA_CERT — certificate verification disabled")
 		client.Transport = &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		}
+	} else if strings.HasPrefix(apiURL, "http://") && !isLocalhost(apiURL) {
+		fmt.Fprintln(os.Stderr, "Warning: using plaintext HTTP to a remote host — tokens are sent in the clear")
 	}
 
 	if len(os.Args) < 2 {
@@ -984,4 +987,13 @@ func envOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func isLocalhost(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
