@@ -13,7 +13,14 @@ WG_SUBNET="${WG_SUBNET:-10.0.0.1/24}"
 
 # Update and install packages.
 apt-get update -y
-apt-get install -y wireguard wireguard-tools ufw
+apt-get install -y wireguard wireguard-tools ufw fail2ban unattended-upgrades
+
+# Enable automatic security updates.
+cat > /etc/apt/apt.conf.d/20auto-upgrades <<AUTOUPGRADE
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+AUTOUPGRADE
+systemctl enable unattended-upgrades
 
 # Enable IP forwarding.
 cat > /etc/sysctl.d/99-wireguard.conf <<SYSCTL
@@ -48,6 +55,35 @@ chmod 600 /etc/wireguard/wg0.conf
 systemctl enable wg-quick@wg0
 systemctl start wg-quick@wg0
 
+# Harden SSH.
+sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+systemctl restart sshd
+
+# Create deploy user with sudo for agent management.
+if ! id deploy &>/dev/null; then
+    useradd -m -s /bin/bash deploy
+    mkdir -p /home/deploy/.ssh
+    # Copy root's authorized_keys for initial access.
+    cp /root/.ssh/authorized_keys /home/deploy/.ssh/authorized_keys
+    chown -R deploy:deploy /home/deploy/.ssh
+    chmod 700 /home/deploy/.ssh
+    chmod 600 /home/deploy/.ssh/authorized_keys
+    echo "deploy ALL=(root) NOPASSWD: /bin/systemctl restart vpn-agent, /bin/systemctl restart vpn-api, /bin/cp" > /etc/sudoers.d/deploy
+    chmod 440 /etc/sudoers.d/deploy
+fi
+
+# Configure fail2ban for SSH.
+cat > /etc/fail2ban/jail.local <<F2B
+[sshd]
+enabled = true
+port = ssh
+maxretry = 5
+bantime = 3600
+F2B
+systemctl enable fail2ban
+systemctl start fail2ban
+
 # Configure UFW firewall.
 ufw default deny incoming
 ufw default allow outgoing
@@ -71,7 +107,7 @@ Type=simple
 ExecStart=/opt/vpn-agent/agent -interface wg0
 Restart=always
 RestartSec=5
-EnvironmentFile=-/opt/vpn-agent/.env
+EnvironmentFile=/opt/vpn-agent/.env
 
 [Install]
 WantedBy=multi-user.target
