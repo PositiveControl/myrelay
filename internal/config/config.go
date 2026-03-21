@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -127,10 +128,11 @@ func (c *Config) AddPeer(name, publicKey string) (*Peer, string, error) {
 	}
 
 	if c.NextIP > 254 {
-		return nil, "", fmt.Errorf("no more IPs available in 10.0.0.0/24")
+		return nil, "", fmt.Errorf("no more IPs available in subnet")
 	}
 
-	address := fmt.Sprintf("10.0.0.%d/32", c.NextIP)
+	base := subnetBase(c.Server.Address)
+	address := fmt.Sprintf("%s%d/32", base, c.NextIP)
 	peer := Peer{
 		Name:       name,
 		PublicKey:  publicKey,
@@ -227,4 +229,18 @@ func (c *Config) Reload() (bool, error) {
 	c.NextIP = fresh.NextIP
 	c.Peers = fresh.Peers
 	return changed, nil
+}
+
+// subnetBase extracts the first three octets from a CIDR address.
+// e.g., "10.0.1.1/24" -> "10.0.1."
+func subnetBase(address string) string {
+	ip, _, err := net.ParseCIDR(address)
+	if err != nil {
+		return "10.0.0."
+	}
+	v4 := ip.To4()
+	if v4 == nil {
+		return "10.0.0."
+	}
+	return fmt.Sprintf("%d.%d.%d.", v4[0], v4[1], v4[2])
 }

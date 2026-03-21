@@ -7,6 +7,10 @@ export DEBIAN_FRONTEND=noninteractive
 
 echo "=== VPN Node Setup ==="
 
+# Node subnet — each node gets a unique /24 (e.g., 10.0.1.0/24, 10.0.2.0/24).
+# Set via cloud-init or environment. Defaults to 10.0.0.0/24 for standalone use.
+WG_SUBNET="${WG_SUBNET:-10.0.0.1/24}"
+
 # Update and install packages.
 apt-get update -y
 apt-get install -y wireguard wireguard-tools ufw
@@ -31,7 +35,7 @@ SERVER_PRIVKEY=$(cat /etc/wireguard/server.key)
 cat > /etc/wireguard/wg0.conf <<WG
 [Interface]
 PrivateKey = ${SERVER_PRIVKEY}
-Address = 10.0.0.1/24
+Address = ${WG_SUBNET}
 ListenPort = 51820
 PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o ${PUBLIC_IFACE} -j MASQUERADE
 PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o ${PUBLIC_IFACE} -j MASQUERADE

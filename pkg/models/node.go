@@ -16,10 +16,12 @@ type Node struct {
 	Name         string     `json:"name"`
 	IP           string     `json:"ip"`
 	Region       string     `json:"region"`
+	Subnet       string     `json:"subnet"`
 	PublicKey    string     `json:"public_key"`
 	Endpoint     string     `json:"endpoint"`
 	MaxPeers     int        `json:"max_peers"`
 	CurrentPeers int        `json:"current_peers"`
+	NextPeerIP   int        `json:"next_peer_ip"`
 	Status       NodeStatus `json:"status"`
 }
 
