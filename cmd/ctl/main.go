@@ -388,12 +388,16 @@ func cmdStatus() {
 	fmt.Printf("Users:  %d\n\n", len(userList))
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NODE\tLOCATION\tIP\tPEERS\tSTATUS")
+	fmt.Fprintln(w, "NODE\tLOCATION\tIP\tOWNER\tSTATUS")
 	fmt.Fprintln(w, "----\t--------\t--\t-----\t------")
 	for _, n := range nodeList {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%.0f/%.0f\t%s\n",
+		ownerID := "-"
+		if v, ok := n["owner_id"].(string); ok && v != "" {
+			ownerID = truncate(v, 12)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
 			n["id"], n["region"], n["ip"],
-			n["current_peers"], n["max_peers"], n["status"])
+			ownerID, n["status"])
 	}
 	w.Flush()
 
@@ -421,12 +425,16 @@ func cmdNodesList() {
 	json.Unmarshal(data, &nodes)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tIP\tREGION\tPEERS\tSTATUS")
+	fmt.Fprintln(w, "ID\tIP\tREGION\tOWNER\tSTATUS")
 	fmt.Fprintln(w, "--\t--\t------\t-----\t------")
 	for _, n := range nodes {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%.0f/%.0f\t%s\n",
+		ownerID := "-"
+		if v, ok := n["owner_id"].(string); ok && v != "" {
+			ownerID = truncate(v, 12)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
 			n["id"], n["ip"], n["region"],
-			n["current_peers"], n["max_peers"], n["status"])
+			ownerID, n["status"])
 	}
 	w.Flush()
 }

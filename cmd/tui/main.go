@@ -42,8 +42,8 @@ type Node struct {
 	Region       string `json:"region"`
 	PublicKey    string `json:"public_key"`
 	Endpoint     string `json:"endpoint"`
-	MaxPeers     int    `json:"max_peers"`
-	CurrentPeers int    `json:"current_peers"`
+	OwnerID  string `json:"owner_id"`
+	MaxPeers int    `json:"max_peers"`
 	Status       string `json:"status"`
 }
 
@@ -306,35 +306,7 @@ func formatBytes(b int64) string {
 	}
 }
 
-func capacityBar(current, max int, width int) string {
-	if max <= 0 {
-		return strings.Repeat("░", width)
-	}
-	pct := float64(current) / float64(max)
-	if pct > 1 {
-		pct = 1
-	}
-	filled := int(pct * float64(width))
-	if filled > width {
-		filled = width
-	}
-	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
-}
 
-func capacityColor(current, max int) string {
-	if max <= 0 {
-		return "gray"
-	}
-	pct := float64(current) / float64(max)
-	switch {
-	case pct >= 0.8:
-		return "red"
-	case pct >= 0.5:
-		return "yellow"
-	default:
-		return "green"
-	}
-}
 
 func bandwidthBar(used, limit int64, width int) string {
 	if limit <= 0 {
@@ -950,10 +922,12 @@ func (t *TUI) refreshDashboard() {
 	nodes := t.snap.Nodes
 	users := t.snap.Users
 
-	totalPeers := 0
+	dedicatedNodes := 0
 	activeNodes := 0
 	for _, n := range nodes {
-		totalPeers += n.CurrentPeers
+		if n.OwnerID != "" {
+			dedicatedNodes++
+		}
 		if strings.EqualFold(n.Status, "active") || strings.EqualFold(n.Status, "online") {
 			activeNodes++
 		}
@@ -963,7 +937,7 @@ func (t *TUI) refreshDashboard() {
 	t.statBoxes.Clear()
 	t.statBoxes.AddItem(makeStatBox("NODES", fmt.Sprintf("%d / %d active", activeNodes, len(nodes)), colorCyan), 0, 1, false)
 	t.statBoxes.AddItem(makeStatBox("USERS", fmt.Sprintf("%d", len(users)), tcell.ColorBlue), 0, 1, false)
-	t.statBoxes.AddItem(makeStatBox("CONNECTIONS", fmt.Sprintf("%d", totalPeers), tcell.ColorGreen), 0, 1, false)
+	t.statBoxes.AddItem(makeStatBox("DEDICATED", fmt.Sprintf("%d / %d", dedicatedNodes, len(nodes)), tcell.ColorGreen), 0, 1, false)
 	t.statBoxes.AddItem(makeStatBox("BANDWIDTH", fmt.Sprintf("↓%s  ↑%s", formatBytes(t.snap.TotalBWIn), formatBytes(t.snap.TotalBWOut)), tcell.ColorYellow), 0, 1, false)
 
 	// Node cards
@@ -997,11 +971,9 @@ func (t *TUI) makeNodeCard(node Node, bwEntries []BandwidthEntry) *tview.TextVie
 		SetBackgroundColor(tcell.NewRGBColor(15, 15, 25))
 
 	sColor := statusColor(node.Status)
-	capColor := capacityColor(node.CurrentPeers, node.MaxPeers)
-	bar := capacityBar(node.CurrentPeers, node.MaxPeers, 16)
-	pct := 0
-	if node.MaxPeers > 0 {
-		pct = node.CurrentPeers * 100 / node.MaxPeers
+	ownerStr := "[gray]unassigned[-]"
+	if node.OwnerID != "" {
+		ownerStr = fmt.Sprintf("[white::b]%s[-]", truncate(node.OwnerID, 12))
 	}
 
 	var bwIn, bwOut int64
@@ -1027,27 +999,15 @@ func (t *TUI) makeNodeCard(node Node, bwEntries []BandwidthEntry) *tview.TextVie
 		statusFormatted = fmt.Sprintf("[#ff5f5f::b]● %s[-]", statusStr)
 	}
 
-	// Bright bar colors
-	var barColor string
-	switch capColor {
-	case "green":
-		barColor = "#00ff87"
-	case "yellow":
-		barColor = "#ffff00"
-	default:
-		barColor = "#ff5f5f"
-	}
-	pctStr := fmt.Sprintf("[%s::b]%d%%[-]", barColor, pct)
-
 	text := fmt.Sprintf(
 		" [#5fafff]IP:[-]     [white::b]%s[-]\n"+
 			" [#5fafff]Region:[-] [white::b]%s[-]\n"+
 			" [#5fafff]Status:[-] %s\n"+
-			" [#5fafff]Peers:[-]  [%s::b]%s[-] [white::b]%d/%d[-] %s\n"+
+			" [#5fafff]Owner:[-]  %s\n"+
 			" [#5fafff]BW:[-]    [white::b]↓%s  ↑%s[-]",
 		node.IP, node.Region,
 		statusFormatted,
-		barColor, bar, node.CurrentPeers, node.MaxPeers, pctStr,
+		ownerStr,
 		formatBytes(bwIn), formatBytes(bwOut),
 	)
 	tv.SetText(text)
@@ -1058,7 +1018,7 @@ func (t *TUI) makeNodeCard(node Node, bwEntries []BandwidthEntry) *tview.TextVie
 // Nodes table
 // ---------------------------------------------------------------------------
 
-var nodeColumns = []string{"Name", "IP", "Region", "Peers", "Capacity", "Status", "BW In", "BW Out"}
+var nodeColumns = []string{"Name", "IP", "Region", "Owner", "Status", "BW In", "BW Out"}
 
 func (t *TUI) refreshNodesTable() {
 	nodes := make([]Node, len(t.snap.Nodes))
@@ -1090,21 +1050,12 @@ func (t *TUI) refreshNodesTable() {
 		case 2:
 			less = strings.ToLower(a.Region) < strings.ToLower(b.Region)
 		case 3:
-			less = a.CurrentPeers < b.CurrentPeers
+			less = a.OwnerID < b.OwnerID
 		case 4:
-			pa, pb := 0.0, 0.0
-			if a.MaxPeers > 0 {
-				pa = float64(a.CurrentPeers) / float64(a.MaxPeers)
-			}
-			if b.MaxPeers > 0 {
-				pb = float64(b.CurrentPeers) / float64(b.MaxPeers)
-			}
-			less = pa < pb
-		case 5:
 			less = a.Status < b.Status
-		case 6:
+		case 5:
 			less = nbw[a.ID].In < nbw[b.ID].In
-		case 7:
+		case 6:
 			less = nbw[a.ID].Out < nbw[b.ID].Out
 		default:
 			less = a.Name < b.Name
@@ -1143,12 +1094,6 @@ func (t *TUI) refreshNodesTable() {
 	for r, node := range nodes {
 		row := r + 1
 		sColor := statusColor(node.Status)
-		capColor := capacityColor(node.CurrentPeers, node.MaxPeers)
-		bar := capacityBar(node.CurrentPeers, node.MaxPeers, 12)
-		pct := 0
-		if node.MaxPeers > 0 {
-			pct = node.CurrentPeers * 100 / node.MaxPeers
-		}
 		nb := nbw[node.ID]
 
 		bgColor := tcell.NewRGBColor(20, 20, 35)
@@ -1168,17 +1113,14 @@ func (t *TUI) refreshNodesTable() {
 		setCell(0, node.Name, tcell.ColorWhite)
 		setCell(1, node.IP, colorLightGray)
 		setCell(2, node.Region, colorLightGray)
-		setCell(3, fmt.Sprintf("%d/%d", node.CurrentPeers, node.MaxPeers), tcell.ColorWhite)
 
-		capText := fmt.Sprintf("%s %d%%", bar, pct)
-		capTColor := tcell.ColorGreen
-		switch capColor {
-		case "yellow":
-			capTColor = tcell.ColorYellow
-		case "red":
-			capTColor = tcell.ColorRed
+		ownerDisplay := "-"
+		ownerColor := colorLightGray
+		if node.OwnerID != "" {
+			ownerDisplay = truncate(node.OwnerID, 12)
+			ownerColor = tcell.ColorWhite
 		}
-		setCell(4, capText, capTColor)
+		setCell(3, ownerDisplay, ownerColor)
 
 		sTColor := tcell.ColorGreen
 		switch sColor {
@@ -1187,9 +1129,9 @@ func (t *TUI) refreshNodesTable() {
 		case "red":
 			sTColor = tcell.ColorRed
 		}
-		setCell(5, strings.ToUpper(node.Status), sTColor)
-		setCell(6, formatBytes(nb.In), colorLightCyan)
-		setCell(7, formatBytes(nb.Out), colorLightCyan)
+		setCell(4, strings.ToUpper(node.Status), sTColor)
+		setCell(5, formatBytes(nb.In), colorLightCyan)
+		setCell(6, formatBytes(nb.Out), colorLightCyan)
 	}
 
 	// Restore selection — disable selectable if no data rows to prevent crashes
@@ -1389,11 +1331,9 @@ func (t *TUI) showNodeDetailModal() {
 		SetBackgroundColor(tcell.NewRGBColor(15, 15, 30))
 
 	sColor := statusColor(node.Status)
-	capColor := capacityColor(node.CurrentPeers, node.MaxPeers)
-	bar := capacityBar(node.CurrentPeers, node.MaxPeers, 20)
-	pct := 0
-	if node.MaxPeers > 0 {
-		pct = node.CurrentPeers * 100 / node.MaxPeers
+	ownerStr := "[gray]unassigned[-]"
+	if node.OwnerID != "" {
+		ownerStr = fmt.Sprintf("[white]%s[-]", node.OwnerID)
 	}
 
 	var sb strings.Builder
@@ -1405,7 +1345,11 @@ func (t *TUI) showNodeDetailModal() {
 	fmt.Fprintf(&sb, "  [gray]Endpoint:[-]   [white]%s[-]\n", node.Endpoint)
 	fmt.Fprintf(&sb, "  [gray]Public Key:[-] [white]%s[-]\n", truncate(node.PublicKey, 44))
 	fmt.Fprintf(&sb, "  [gray]Status:[-]     [%s]%s[-]\n", sColor, strings.ToUpper(node.Status))
-	fmt.Fprintf(&sb, "  [gray]Capacity:[-]   [%s]%s[-] [white]%d/%d[-] [gray](%d%%)[-]\n\n", capColor, bar, node.CurrentPeers, node.MaxPeers, pct)
+	fmt.Fprintf(&sb, "  [gray]Owner:[-]      %s\n", ownerStr)
+	if node.MaxPeers > 0 {
+		fmt.Fprintf(&sb, "  [gray]Max Peers:[-]  [white]%d[-]\n", node.MaxPeers)
+	}
+	fmt.Fprintln(&sb)
 
 	if len(bwEntries) > 0 {
 		fmt.Fprintf(&sb, " [bold][cyan]Per-Peer Bandwidth[-]\n\n")
