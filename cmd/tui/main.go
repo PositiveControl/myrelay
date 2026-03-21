@@ -999,15 +999,23 @@ func (t *TUI) makeNodeCard(node Node, bwEntries []BandwidthEntry) *tview.TextVie
 		statusFormatted = fmt.Sprintf("[#ff5f5f::b]● %s[-]", statusStr)
 	}
 
+	peerCount := len(bwEntries)
+	peersStr := fmt.Sprintf("[white::b]%d[-]", peerCount)
+	if node.MaxPeers > 0 {
+		peersStr = fmt.Sprintf("[white::b]%d / %d[-]", peerCount, node.MaxPeers)
+	}
+
 	text := fmt.Sprintf(
 		" [#5fafff]IP:[-]     [white::b]%s[-]\n"+
 			" [#5fafff]Region:[-] [white::b]%s[-]\n"+
 			" [#5fafff]Status:[-] %s\n"+
 			" [#5fafff]Owner:[-]  %s\n"+
+			" [#5fafff]Peers:[-]  %s\n"+
 			" [#5fafff]BW:[-]    [white::b]↓%s  ↑%s[-]",
 		node.IP, node.Region,
 		statusFormatted,
 		ownerStr,
+		peersStr,
 		formatBytes(bwIn), formatBytes(bwOut),
 	)
 	tv.SetText(text)
@@ -1018,7 +1026,7 @@ func (t *TUI) makeNodeCard(node Node, bwEntries []BandwidthEntry) *tview.TextVie
 // Nodes table
 // ---------------------------------------------------------------------------
 
-var nodeColumns = []string{"Name", "IP", "Region", "Owner", "Status", "BW In", "BW Out"}
+var nodeColumns = []string{"Name", "IP", "Region", "Owner", "Peers", "Status", "BW In", "BW Out"}
 
 func (t *TUI) refreshNodesTable() {
 	nodes := make([]Node, len(t.snap.Nodes))
@@ -1052,10 +1060,12 @@ func (t *TUI) refreshNodesTable() {
 		case 3:
 			less = a.OwnerID < b.OwnerID
 		case 4:
-			less = a.Status < b.Status
+			less = len(t.snap.NodeBandwidth[a.ID]) < len(t.snap.NodeBandwidth[b.ID])
 		case 5:
-			less = nbw[a.ID].In < nbw[b.ID].In
+			less = a.Status < b.Status
 		case 6:
+			less = nbw[a.ID].In < nbw[b.ID].In
+		case 7:
 			less = nbw[a.ID].Out < nbw[b.ID].Out
 		default:
 			less = a.Name < b.Name
@@ -1122,6 +1132,13 @@ func (t *TUI) refreshNodesTable() {
 		}
 		setCell(3, ownerDisplay, ownerColor)
 
+		peerCount := len(t.snap.NodeBandwidth[node.ID])
+		peerStr := fmt.Sprintf("%d", peerCount)
+		if node.MaxPeers > 0 {
+			peerStr = fmt.Sprintf("%d/%d", peerCount, node.MaxPeers)
+		}
+		setCell(4, peerStr, tcell.ColorWhite)
+
 		sTColor := tcell.ColorGreen
 		switch sColor {
 		case "yellow":
@@ -1129,9 +1146,9 @@ func (t *TUI) refreshNodesTable() {
 		case "red":
 			sTColor = tcell.ColorRed
 		}
-		setCell(4, strings.ToUpper(node.Status), sTColor)
-		setCell(5, formatBytes(nb.In), colorLightCyan)
-		setCell(6, formatBytes(nb.Out), colorLightCyan)
+		setCell(5, strings.ToUpper(node.Status), sTColor)
+		setCell(6, formatBytes(nb.In), colorLightCyan)
+		setCell(7, formatBytes(nb.Out), colorLightCyan)
 	}
 
 	// Restore selection — disable selectable if no data rows to prevent crashes
@@ -1346,8 +1363,11 @@ func (t *TUI) showNodeDetailModal() {
 	fmt.Fprintf(&sb, "  [gray]Public Key:[-] [white]%s[-]\n", truncate(node.PublicKey, 44))
 	fmt.Fprintf(&sb, "  [gray]Status:[-]     [%s]%s[-]\n", sColor, strings.ToUpper(node.Status))
 	fmt.Fprintf(&sb, "  [gray]Owner:[-]      %s\n", ownerStr)
+	peerCount := len(bwEntries)
 	if node.MaxPeers > 0 {
-		fmt.Fprintf(&sb, "  [gray]Max Peers:[-]  [white]%d[-]\n", node.MaxPeers)
+		fmt.Fprintf(&sb, "  [gray]Peers:[-]      [white]%d / %d[-]\n", peerCount, node.MaxPeers)
+	} else {
+		fmt.Fprintf(&sb, "  [gray]Peers:[-]      [white]%d[-]\n", peerCount)
 	}
 	fmt.Fprintln(&sb)
 

@@ -229,6 +229,15 @@ func newStandaloneServer(addr, iface, token, tlsCertFile string, mon *bandwidth.
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(status)
 	}))
+	mux.HandleFunc("GET /status", requireToken(func(w http.ResponseWriter, r *http.Request) {
+		peers := cfg.ListPeers()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"mode":       "standalone",
+			"interface":  iface,
+			"peer_count": len(peers),
+		})
+	}))
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"status":"ok","mode":"standalone"}`)
@@ -367,6 +376,21 @@ func newManagedServer(addr, adminToken, tlsCertFile string, mgr *InterfaceManage
 		status := security.Collect(tlsEnabled, tlsCertFile)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(status)
+	}))
+	mux.HandleFunc("GET /status", requireAdmin(func(w http.ResponseWriter, r *http.Request) {
+		ifaces := mgr.List()
+		totalPeers := 0
+		for _, info := range ifaces {
+			if peers, err := wireguard.ShowPeers(info.Name); err == nil {
+				totalPeers += len(peers)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"mode":             "managed",
+			"interface_count":  len(ifaces),
+			"peer_count":       totalPeers,
+		})
 	}))
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
