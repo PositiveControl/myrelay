@@ -21,6 +21,7 @@ type Node struct {
 	PublicKey  string     `json:"public_key"`
 	Endpoint   string     `json:"endpoint"`
 	OwnerID    string     `json:"owner_id"`
+	ProviderID string     `json:"provider_id"`
 	MaxPeers   int        `json:"max_peers"`
 	NextPeerIP int        `json:"next_peer_ip"`
 	Status     NodeStatus `json:"status"`
