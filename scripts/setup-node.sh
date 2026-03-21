@@ -92,10 +92,16 @@ ufw allow 51820/udp comment "WireGuard"
 ufw allow 8081/tcp comment "VPN Agent API"
 ufw --force enable
 
-# Create a directory for the agent binary.
-mkdir -p /opt/vpn-agent
+# Create agent user and directories.
+if ! id vpnagent &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d /opt/vpn-agent vpnagent
+fi
+mkdir -p /opt/vpn-agent /var/lib/myrelay
+chown vpnagent:vpnagent /opt/vpn-agent /var/lib/myrelay
 
-# Create a systemd service for the agent.
+# Create a systemd service for the agent with privilege separation.
+# The agent runs as vpnagent with only CAP_NET_ADMIN (WireGuard management)
+# and CAP_NET_RAW (required for some iptables operations) instead of root.
 cat > /etc/systemd/system/vpn-agent.service <<SERVICE
 [Unit]
 Description=VPN Node Agent
@@ -104,10 +110,18 @@ Wants=wg-quick@wg0.service
 
 [Service]
 Type=simple
+User=vpnagent
+Group=vpnagent
 ExecStart=/opt/vpn-agent/agent -interface wg0
 Restart=always
 RestartSec=5
 EnvironmentFile=/opt/vpn-agent/.env
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/myrelay /opt/vpn-agent
+ProtectHome=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

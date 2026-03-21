@@ -120,7 +120,9 @@ func (m *Monitor) poll() {
 		if hasPrev {
 			deltaRecv = t.BytesReceived - prev.BytesReceived
 			deltaSent = t.BytesSent - prev.BytesSent
-			// Handle counter reset (e.g. interface restart).
+			// Handle counter reset (e.g. interface restart):
+			// WireGuard resets to zero, so delta goes negative.
+			// Use the current value as the delta (traffic since reset).
 			if deltaRecv < 0 {
 				deltaRecv = t.BytesReceived
 			}
@@ -135,8 +137,10 @@ func (m *Monitor) poll() {
 			m.peers[t.PublicKey] = pb
 		}
 
-		pb.TotalReceived = t.BytesReceived
-		pb.TotalSent = t.BytesSent
+		// Accumulate deltas into cumulative totals so they survive
+		// interface restarts (which reset WireGuard counters to zero).
+		pb.TotalReceived += deltaRecv
+		pb.TotalSent += deltaSent
 		pb.IntervalReceived = deltaRecv
 		pb.IntervalSent = deltaSent
 		pb.LastUpdated = now
