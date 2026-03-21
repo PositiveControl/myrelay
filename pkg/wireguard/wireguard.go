@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+
+	"github.com/PositiveControl/myrelay/pkg/validate"
 )
 
 // KeyPair holds a WireGuard private and public key.
@@ -60,8 +62,18 @@ func GenerateKeyPair() (*KeyPair, error) {
 }
 
 // GeneratePeerConfig renders a complete WireGuard client configuration file
-// from the given PeerConfig values.
+// from the given PeerConfig values. All fields are sanitized to prevent
+// WireGuard directive injection via newlines.
 func GeneratePeerConfig(cfg PeerConfig) (string, error) {
+	// Strip newlines and carriage returns from all fields to prevent
+	// injection of additional WireGuard directives.
+	cfg.PrivateKey = sanitizeConfigValue(cfg.PrivateKey)
+	cfg.Address = sanitizeConfigValue(cfg.Address)
+	cfg.DNS = sanitizeConfigValue(cfg.DNS)
+	cfg.PublicKey = sanitizeConfigValue(cfg.PublicKey)
+	cfg.Endpoint = sanitizeConfigValue(cfg.Endpoint)
+	cfg.AllowedIPs = sanitizeConfigValue(cfg.AllowedIPs)
+
 	const tmpl = `[Interface]
 PrivateKey = {{ .PrivateKey }}
 Address = {{ .Address }}
@@ -83,6 +95,14 @@ PersistentKeepalive = 25
 		return "", fmt.Errorf("execute template: %w", err)
 	}
 	return buf.String(), nil
+}
+
+// sanitizeConfigValue strips newlines and carriage returns to prevent
+// injection of additional WireGuard config directives.
+func sanitizeConfigValue(s string) string {
+	s = strings.ReplaceAll(s, "\n", "")
+	s = strings.ReplaceAll(s, "\r", "")
+	return s
 }
 
 // ParseWgShow parses the output of `wg show <interface> transfer` and returns
@@ -131,6 +151,16 @@ func ParseWgShow(output string) ([]PeerTransfer, error) {
 // CreateInterface creates a WireGuard interface, generates a keypair,
 // assigns an address, and brings it up. Returns the public key.
 func CreateInterface(name string, listenPort int, address string) (string, error) {
+	if err := validate.InterfaceName(name); err != nil {
+		return "", fmt.Errorf("invalid interface name: %w", err)
+	}
+	if err := validate.ListenPort(listenPort); err != nil {
+		return "", fmt.Errorf("invalid listen port: %w", err)
+	}
+	if err := validate.CIDR(address); err != nil {
+		return "", fmt.Errorf("invalid address: %w", err)
+	}
+
 	// Create the interface.
 	if out, err := exec.Command("ip", "link", "add", name, "type", "wireguard").CombinedOutput(); err != nil {
 		return "", fmt.Errorf("ip link add %s: %s: %w", name, string(out), err)
@@ -181,6 +211,13 @@ func CreateInterface(name string, listenPort int, address string) (string, error
 
 // DestroyInterface tears down a WireGuard interface and cleans up NAT rules.
 func DestroyInterface(name string, subnet string) error {
+	if err := validate.InterfaceName(name); err != nil {
+		return fmt.Errorf("invalid interface name: %w", err)
+	}
+	if err := validate.CIDR(subnet); err != nil {
+		return fmt.Errorf("invalid subnet: %w", err)
+	}
+
 	// Remove NAT rule (best-effort).
 	_ = exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", subnet, "-o", "eth0", "-j", "MASQUERADE").Run()
 
@@ -215,6 +252,9 @@ type PeerInfo struct {
 
 // ShowPeers returns info about all configured peers on an interface by parsing `wg show`.
 func ShowPeers(interfaceName string) ([]PeerInfo, error) {
+	if err := validate.InterfaceName(interfaceName); err != nil {
+		return nil, fmt.Errorf("invalid interface name: %w", err)
+	}
 	cmd := exec.Command("wg", "show", interfaceName, "dump")
 	out, err := cmd.Output()
 	if err != nil {
@@ -254,6 +294,9 @@ func ShowPeers(interfaceName string) ([]PeerInfo, error) {
 // ApplyConfig writes a WireGuard configuration and brings the interface up
 // using wg-quick.
 func ApplyConfig(interfaceName, configPath string) error {
+	if err := validate.InterfaceName(interfaceName); err != nil {
+		return fmt.Errorf("invalid interface name: %w", err)
+	}
 	// Bring down existing interface (ignore error if not up)
 	downCmd := exec.Command("wg-quick", "down", interfaceName)
 	_ = downCmd.Run()
@@ -268,6 +311,9 @@ func ApplyConfig(interfaceName, configPath string) error {
 // ReadServerPublicKey reads the server's own public key from a WireGuard
 // interface by parsing the first line of `wg show <iface> dump`.
 func ReadServerPublicKey(interfaceName string) (string, error) {
+	if err := validate.InterfaceName(interfaceName); err != nil {
+		return "", fmt.Errorf("invalid interface name: %w", err)
+	}
 	cmd := exec.Command("wg", "show", interfaceName, "public-key")
 	out, err := cmd.Output()
 	if err != nil {
@@ -280,6 +326,9 @@ func ReadServerPublicKey(interfaceName string) (string, error) {
 // by reading the interface's listen port and discovering the public IP.
 // Returns "IP:port" or an error.
 func ReadServerEndpoint(interfaceName string) (string, error) {
+	if err := validate.InterfaceName(interfaceName); err != nil {
+		return "", fmt.Errorf("invalid interface name: %w", err)
+	}
 	cmd := exec.Command("wg", "show", interfaceName, "listen-port")
 	out, err := cmd.Output()
 	if err != nil {
@@ -304,14 +353,25 @@ func ReadServerEndpoint(interfaceName string) (string, error) {
 }
 
 // SyncPeers calls `wg set` to add or remove a peer on a live interface without
-// restarting.
+// restarting. All inputs are validated before being passed to exec.Command.
 func SyncPeers(interfaceName string, publicKey string, allowedIPs string, remove bool) error {
+	if err := validate.InterfaceName(interfaceName); err != nil {
+		return fmt.Errorf("invalid interface name: %w", err)
+	}
+	if err := validate.WireGuardKey(publicKey); err != nil {
+		return fmt.Errorf("invalid public key: %w", err)
+	}
+
 	if remove {
 		cmd := exec.Command("wg", "set", interfaceName, "peer", publicKey, "remove")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("wg set remove peer: %s: %w", string(out), err)
 		}
 		return nil
+	}
+
+	if err := validate.CIDR(allowedIPs); err != nil {
+		return fmt.Errorf("invalid allowed IPs: %w", err)
 	}
 
 	cmd := exec.Command("wg", "set", interfaceName, "peer", publicKey, "allowed-ips", allowedIPs)
