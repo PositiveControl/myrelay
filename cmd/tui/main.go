@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -246,6 +245,12 @@ func (c *APIClient) GetNodeBandwidth(nodeID string) ([]BandwidthEntry, error) {
 	return entries, err
 }
 
+func (c *APIClient) GetAllBandwidth() (map[string][]BandwidthEntry, error) {
+	var result map[string][]BandwidthEntry
+	err := c.get("/api/nodes/bandwidth", &result)
+	return result, err
+}
+
 func (c *APIClient) GetNodeSecurity(nodeID string) (*SecurityStatus, error) {
 	var status SecurityStatus
 	err := c.get(fmt.Sprintf("/api/nodes/%s/security", nodeID), &status)
@@ -255,9 +260,16 @@ func (c *APIClient) GetNodeSecurity(nodeID string) (*SecurityStatus, error) {
 	return &status, nil
 }
 
+func (c *APIClient) GetAllSecurity() (map[string]*SecurityStatus, error) {
+	var result map[string]*SecurityStatus
+	err := c.get("/api/nodes/security", &result)
+	return result, err
+}
+
 // fetchSnapshot does all API calls and returns an immutable Snapshot.
 // Runs on the poller goroutine — never touches UI.
-// Security data is fetched every 6th cycle (~60s) to reduce request volume.
+// Uses batch endpoints to minimize request count.
+// Security data is fetched every 6th cycle (~60s) since it rarely changes.
 func (c *APIClient) fetchSnapshot(prevSecurity map[string]*SecurityStatus) Snapshot {
 	c.pollCount++
 	fetchSecurity := c.pollCount%6 == 1 // first poll + every 6th
@@ -282,58 +294,35 @@ func (c *APIClient) fetchSnapshot(prevSecurity map[string]*SecurityStatus) Snaps
 	nodes, err := c.GetNodes()
 	if err == nil {
 		snap.Nodes = nodes
-
-		// Fetch per-node data concurrently to reduce total latency.
-		type nodeResult struct {
-			id         string
-			peerCount  int
-			entries    []BandwidthEntry
-			security   *SecurityStatus
-		}
-		results := make([]nodeResult, len(nodes))
-		var wg sync.WaitGroup
-		for i, node := range nodes {
-			wg.Add(1)
-			go func(idx int, n Node) {
-				defer wg.Done()
-				r := nodeResult{id: n.ID, peerCount: n.PeerCount}
-				entries, err := c.GetNodeBandwidth(n.ID)
-				if err == nil {
-					r.entries = entries
-				}
-				if fetchSecurity {
-					sec, err := c.GetNodeSecurity(n.ID)
-					if err == nil {
-						r.security = sec
-					}
-				}
-				results[idx] = r
-			}(i, node)
-		}
-		wg.Wait()
-
-		for _, r := range results {
-			if r.peerCount > 0 {
-				snap.NodePeerCounts[r.id] = r.peerCount
-			}
-			if r.entries != nil {
-				snap.NodeBandwidth[r.id] = r.entries
-				for _, e := range r.entries {
-					snap.TotalBWIn += e.TotalReceived
-					snap.TotalBWOut += e.TotalSent
-				}
-				if snap.NodePeerCounts[r.id] == 0 && len(r.entries) > 0 {
-					snap.NodePeerCounts[r.id] = len(r.entries)
-				}
-			}
-			if r.security != nil {
-				snap.NodeSecurity[r.id] = r.security
+		for _, node := range nodes {
+			if node.PeerCount > 0 {
+				snap.NodePeerCounts[node.ID] = node.PeerCount
 			}
 		}
 	}
 
-	// Carry forward previous security data when not fetching this cycle.
-	if !fetchSecurity {
+	// Batch bandwidth: single request for all nodes.
+	allBW, err := c.GetAllBandwidth()
+	if err == nil {
+		for nodeID, entries := range allBW {
+			snap.NodeBandwidth[nodeID] = entries
+			for _, e := range entries {
+				snap.TotalBWIn += e.TotalReceived
+				snap.TotalBWOut += e.TotalSent
+			}
+			if snap.NodePeerCounts[nodeID] == 0 && len(entries) > 0 {
+				snap.NodePeerCounts[nodeID] = len(entries)
+			}
+		}
+	}
+
+	// Batch security: single request for all nodes, only every 6th cycle.
+	if fetchSecurity {
+		allSec, err := c.GetAllSecurity()
+		if err == nil {
+			snap.NodeSecurity = allSec
+		}
+	} else {
 		for k, v := range prevSecurity {
 			snap.NodeSecurity[k] = v
 		}
