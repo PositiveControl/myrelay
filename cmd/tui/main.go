@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -156,6 +157,7 @@ type APIClient struct {
 	token          string
 	client         *http.Client
 	healthFailures int
+	pollCount      int
 }
 
 func NewAPIClient() *APIClient {
@@ -190,26 +192,34 @@ func NewAPIClient() *APIClient {
 }
 
 func (c *APIClient) get(path string, out interface{}) error {
-	req, err := http.NewRequest("GET", c.baseURL+path, nil)
-	if err != nil {
-		return err
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := http.NewRequest("GET", c.baseURL+path, nil)
+		if err != nil {
+			return err
+		}
+		if c.token != "" {
+			req.Header.Set("Authorization", "Bearer "+c.token)
+		}
+		resp, err := c.client.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			// Back off before retry.
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		}
+		return json.Unmarshal(body, out)
 	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
-	return json.Unmarshal(body, out)
+	return fmt.Errorf("rate limited after retries")
 }
 
 func (c *APIClient) CheckHealth() (*HealthResp, error) {
@@ -247,7 +257,11 @@ func (c *APIClient) GetNodeSecurity(nodeID string) (*SecurityStatus, error) {
 
 // fetchSnapshot does all API calls and returns an immutable Snapshot.
 // Runs on the poller goroutine — never touches UI.
-func (c *APIClient) fetchSnapshot() Snapshot {
+// Security data is fetched every 6th cycle (~60s) to reduce request volume.
+func (c *APIClient) fetchSnapshot(prevSecurity map[string]*SecurityStatus) Snapshot {
+	c.pollCount++
+	fetchSecurity := c.pollCount%6 == 1 // first poll + every 6th
+
 	snap := Snapshot{
 		NodeBandwidth:  make(map[string][]BandwidthEntry),
 		NodePeerCounts: make(map[string]int),
@@ -268,27 +282,60 @@ func (c *APIClient) fetchSnapshot() Snapshot {
 	nodes, err := c.GetNodes()
 	if err == nil {
 		snap.Nodes = nodes
-		for _, node := range nodes {
-			// Use peer_count from the node object if the API provides it.
-			if node.PeerCount > 0 {
-				snap.NodePeerCounts[node.ID] = node.PeerCount
+
+		// Fetch per-node data concurrently to reduce total latency.
+		type nodeResult struct {
+			id         string
+			peerCount  int
+			entries    []BandwidthEntry
+			security   *SecurityStatus
+		}
+		results := make([]nodeResult, len(nodes))
+		var wg sync.WaitGroup
+		for i, node := range nodes {
+			wg.Add(1)
+			go func(idx int, n Node) {
+				defer wg.Done()
+				r := nodeResult{id: n.ID, peerCount: n.PeerCount}
+				entries, err := c.GetNodeBandwidth(n.ID)
+				if err == nil {
+					r.entries = entries
+				}
+				if fetchSecurity {
+					sec, err := c.GetNodeSecurity(n.ID)
+					if err == nil {
+						r.security = sec
+					}
+				}
+				results[idx] = r
+			}(i, node)
+		}
+		wg.Wait()
+
+		for _, r := range results {
+			if r.peerCount > 0 {
+				snap.NodePeerCounts[r.id] = r.peerCount
 			}
-			entries, err := c.GetNodeBandwidth(node.ID)
-			if err == nil {
-				snap.NodeBandwidth[node.ID] = entries
-				for _, e := range entries {
+			if r.entries != nil {
+				snap.NodeBandwidth[r.id] = r.entries
+				for _, e := range r.entries {
 					snap.TotalBWIn += e.TotalReceived
 					snap.TotalBWOut += e.TotalSent
 				}
-				// Fall back to bandwidth entry count if node didn't report peer_count.
-				if snap.NodePeerCounts[node.ID] == 0 && len(entries) > 0 {
-					snap.NodePeerCounts[node.ID] = len(entries)
+				if snap.NodePeerCounts[r.id] == 0 && len(r.entries) > 0 {
+					snap.NodePeerCounts[r.id] = len(r.entries)
 				}
 			}
-			sec, err := c.GetNodeSecurity(node.ID)
-			if err == nil {
-				snap.NodeSecurity[node.ID] = sec
+			if r.security != nil {
+				snap.NodeSecurity[r.id] = r.security
 			}
+		}
+	}
+
+	// Carry forward previous security data when not fetching this cycle.
+	if !fetchSecurity {
+		for k, v := range prevSecurity {
+			snap.NodeSecurity[k] = v
 		}
 	}
 
@@ -1535,8 +1582,10 @@ func makeModal(content tview.Primitive, width, height int) *tview.Flex {
 // ---------------------------------------------------------------------------
 
 func (t *TUI) pollData(snapCh chan Snapshot) {
+	var prevSecurity map[string]*SecurityStatus
 	for {
-		snap := t.api.fetchSnapshot()
+		snap := t.api.fetchSnapshot(prevSecurity)
+		prevSecurity = snap.NodeSecurity
 		// Non-blocking send: drop stale snapshot if UI hasn't consumed the last one.
 		select {
 		case snapCh <- snap:
@@ -1548,7 +1597,7 @@ func (t *TUI) pollData(snapCh chan Snapshot) {
 			}
 			snapCh <- snap
 		}
-		time.Sleep(5 * time.Second)
+		time.Sleep(10 * time.Second)
 	}
 }
 
