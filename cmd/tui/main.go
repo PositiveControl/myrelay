@@ -36,15 +36,16 @@ type HealthResp struct {
 }
 
 type Node struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	IP           string `json:"ip"`
-	Region       string `json:"region"`
-	PublicKey    string `json:"public_key"`
-	Endpoint     string `json:"endpoint"`
-	OwnerID  string `json:"owner_id"`
-	MaxPeers int    `json:"max_peers"`
-	Status       string `json:"status"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	IP        string `json:"ip"`
+	Region    string `json:"region"`
+	PublicKey string `json:"public_key"`
+	Endpoint  string `json:"endpoint"`
+	OwnerID   string `json:"owner_id"`
+	MaxPeers  int    `json:"max_peers"`
+	PeerCount int    `json:"peer_count"`
+	Status    string `json:"status"`
 }
 
 type User struct {
@@ -122,6 +123,7 @@ type Snapshot struct {
 	Nodes          []Node
 	Users          []User
 	NodeBandwidth  map[string][]BandwidthEntry
+	NodePeerCounts map[string]int // actual peer counts from /status endpoint
 	NodeSecurity   map[string]*SecurityStatus
 	TotalBWIn      int64
 	TotalBWOut     int64
@@ -150,9 +152,10 @@ type UIState struct {
 // ---------------------------------------------------------------------------
 
 type APIClient struct {
-	baseURL string
-	token   string
-	client  *http.Client
+	baseURL        string
+	token          string
+	client         *http.Client
+	healthFailures int
 }
 
 func NewAPIClient() *APIClient {
@@ -246,24 +249,40 @@ func (c *APIClient) GetNodeSecurity(nodeID string) (*SecurityStatus, error) {
 // Runs on the poller goroutine — never touches UI.
 func (c *APIClient) fetchSnapshot() Snapshot {
 	snap := Snapshot{
-		NodeBandwidth: make(map[string][]BandwidthEntry),
-		NodeSecurity:  make(map[string]*SecurityStatus),
-		FetchedAt:     time.Now(),
+		NodeBandwidth:  make(map[string][]BandwidthEntry),
+		NodePeerCounts: make(map[string]int),
+		NodeSecurity:   make(map[string]*SecurityStatus),
+		FetchedAt:      time.Now(),
 	}
 
-	_, err := c.CheckHealth()
-	snap.Healthy = err == nil
+	_, healthErr := c.CheckHealth()
+	if healthErr == nil {
+		c.healthFailures = 0
+		snap.Healthy = true
+	} else {
+		c.healthFailures++
+		// Tolerate up to 2 consecutive failures before marking unhealthy.
+		snap.Healthy = c.healthFailures <= 2
+	}
 
 	nodes, err := c.GetNodes()
 	if err == nil {
 		snap.Nodes = nodes
 		for _, node := range nodes {
+			// Use peer_count from the node object if the API provides it.
+			if node.PeerCount > 0 {
+				snap.NodePeerCounts[node.ID] = node.PeerCount
+			}
 			entries, err := c.GetNodeBandwidth(node.ID)
 			if err == nil {
 				snap.NodeBandwidth[node.ID] = entries
 				for _, e := range entries {
 					snap.TotalBWIn += e.TotalReceived
 					snap.TotalBWOut += e.TotalSent
+				}
+				// Fall back to bandwidth entry count if node didn't report peer_count.
+				if snap.NodePeerCounts[node.ID] == 0 && len(entries) > 0 {
+					snap.NodePeerCounts[node.ID] = len(entries)
 				}
 			}
 			sec, err := c.GetNodeSecurity(node.ID)
@@ -424,8 +443,9 @@ func NewTUI() *TUI {
 	t := &TUI{
 		app: tview.NewApplication(),
 		snap: Snapshot{
-			NodeBandwidth: make(map[string][]BandwidthEntry),
-			NodeSecurity:  make(map[string]*SecurityStatus),
+			NodeBandwidth:  make(map[string][]BandwidthEntry),
+			NodePeerCounts: make(map[string]int),
+			NodeSecurity:   make(map[string]*SecurityStatus),
 		},
 		api: NewAPIClient(),
 	}
@@ -999,7 +1019,7 @@ func (t *TUI) makeNodeCard(node Node, bwEntries []BandwidthEntry) *tview.TextVie
 		statusFormatted = fmt.Sprintf("[#ff5f5f::b]● %s[-]", statusStr)
 	}
 
-	peerCount := len(bwEntries)
+	peerCount := t.snap.NodePeerCounts[node.ID]
 	peersStr := fmt.Sprintf("[white::b]%d[-]", peerCount)
 	if node.MaxPeers > 0 {
 		peersStr = fmt.Sprintf("[white::b]%d / %d[-]", peerCount, node.MaxPeers)
@@ -1060,7 +1080,7 @@ func (t *TUI) refreshNodesTable() {
 		case 3:
 			less = a.OwnerID < b.OwnerID
 		case 4:
-			less = len(t.snap.NodeBandwidth[a.ID]) < len(t.snap.NodeBandwidth[b.ID])
+			less = t.snap.NodePeerCounts[a.ID] < t.snap.NodePeerCounts[b.ID]
 		case 5:
 			less = a.Status < b.Status
 		case 6:
@@ -1132,7 +1152,7 @@ func (t *TUI) refreshNodesTable() {
 		}
 		setCell(3, ownerDisplay, ownerColor)
 
-		peerCount := len(t.snap.NodeBandwidth[node.ID])
+		peerCount := t.snap.NodePeerCounts[node.ID]
 		peerStr := fmt.Sprintf("%d", peerCount)
 		if node.MaxPeers > 0 {
 			peerStr = fmt.Sprintf("%d/%d", peerCount, node.MaxPeers)
@@ -1363,7 +1383,7 @@ func (t *TUI) showNodeDetailModal() {
 	fmt.Fprintf(&sb, "  [gray]Public Key:[-] [white]%s[-]\n", truncate(node.PublicKey, 44))
 	fmt.Fprintf(&sb, "  [gray]Status:[-]     [%s]%s[-]\n", sColor, strings.ToUpper(node.Status))
 	fmt.Fprintf(&sb, "  [gray]Owner:[-]      %s\n", ownerStr)
-	peerCount := len(bwEntries)
+	peerCount := t.snap.NodePeerCounts[node.ID]
 	if node.MaxPeers > 0 {
 		fmt.Fprintf(&sb, "  [gray]Peers:[-]      [white]%d / %d[-]\n", peerCount, node.MaxPeers)
 	} else {
@@ -1514,15 +1534,21 @@ func makeModal(content tview.Primitive, width, height int) *tview.Flex {
 // Data polling — runs on its own goroutine, sends snapshots via channel
 // ---------------------------------------------------------------------------
 
-func (t *TUI) pollData(snapCh chan<- Snapshot) {
-	// Fetch immediately
-	snapCh <- t.api.fetchSnapshot()
-
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		snapCh <- t.api.fetchSnapshot()
+func (t *TUI) pollData(snapCh chan Snapshot) {
+	for {
+		snap := t.api.fetchSnapshot()
+		// Non-blocking send: drop stale snapshot if UI hasn't consumed the last one.
+		select {
+		case snapCh <- snap:
+		default:
+			// Drain the old snapshot and replace with fresh one.
+			select {
+			case <-snapCh:
+			default:
+			}
+			snapCh <- snap
+		}
+		time.Sleep(5 * time.Second)
 	}
 }
 
