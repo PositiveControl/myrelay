@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -288,6 +289,10 @@ func runManaged(iface, apiURL, nodeID, agentToken, listenAddr, tlsCert, tlsKey, 
 			}
 		}
 	}()
+
+	// Announce readiness to the control plane. Runs in the background so a
+	// slow or unreachable control plane cannot stop the agent from serving.
+	go activateWithRetry(apiURL, nodeID, agentToken, tlsCACert)
 
 	// Periodically report bandwidth to the control plane.
 	reportTicker := time.NewTicker(reportInterval)
@@ -630,6 +635,71 @@ func reportBandwidthMulti(apiURL, nodeID, token, caCertPath string, interfaces m
 		log.Printf("Control plane returned status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// activateNode tells the control plane this node's agent is up and ready.
+//
+// Nothing else triggers activation: a freshly provisioned node sits in
+// "provisioning" until this call lands, and the control plane uses the request
+// to create the owner's interface and learn the server public key it generates.
+// It is idempotent, so calling it on every restart is safe.
+func activateNode(apiURL, nodeID, token, caCertPath string) error {
+	url := apiURL + "/api/nodes/" + nodeID + "/activate"
+	req, err := http.NewRequest("POST", url, nil)
+	if err != nil {
+		return err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	if caCertPath != "" {
+		tlsCfg, err := tlsutil.ClientTLSConfig(caCertPath)
+		if err != nil {
+			return fmt.Errorf("failed to load CA cert: %w", err)
+		}
+		httpClient.Transport = &http.Transport{TLSClientConfig: tlsCfg}
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		return fmt.Errorf("control plane returned status %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// activateWithRetry keeps trying to activate in the background.
+//
+// Activation can legitimately fail for a while — the control plane may be
+// restarting, or it may not yet be able to reach this agent to create the
+// interface. Retrying with backoff is what turns a half-provisioned node into a
+// working one without an operator having to notice.
+func activateWithRetry(apiURL, nodeID, token, caCertPath string) {
+	backoff := 5 * time.Second
+	const maxBackoff = 5 * time.Minute
+
+	for attempt := 1; ; attempt++ {
+		if err := activateNode(apiURL, nodeID, token, caCertPath); err != nil {
+			log.Printf("Activation attempt %d failed: %v (retrying in %s)", attempt, err, backoff)
+			time.Sleep(backoff)
+			if backoff < maxBackoff {
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
+			continue
+		}
+		log.Printf("Node %s activated with control plane", nodeID)
+		return
+	}
 }
 
 func envOrDefault(key, fallback string) string {
