@@ -82,10 +82,25 @@ bd close <id>         # Complete work
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd dolt push
+   bd backup export-git --remote beads-backup --branch myrelay-beads-backup
    git push
    git status  # MUST show "up to date with origin"
    ```
+
+   **Not `bd dolt push`** — there is no Dolt remote for this project, so that
+   command fails with `remote 'origin' not found` and beads work stays local.
+   Beads is backed up as a JSONL snapshot pushed to a branch of the **private**
+   `myrelay-cloud` repo, because issues carry pricing, security, and legal
+   notes that must not land in this public repo.
+
+   One-time setup in a fresh clone:
+   ```bash
+   git remote add beads-backup git@github.com:PositiveControl/myrelay-cloud.git
+   ```
+
+   Do not set `backup.git-push: true` in `.beads/config.yaml` — the automatic
+   push has no remote override and would publish issues to `origin`, which is
+   public.
 5. **Clean up** - Clear stashes, prune remote branches
 6. **Verify** - All changes committed AND pushed
 7. **Hand off** - Provide context for next session
