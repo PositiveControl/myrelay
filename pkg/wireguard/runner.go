@@ -36,12 +36,16 @@ func (execRunner) Run(c Command) ([]byte, error) {
 
 var defaultRunner Runner = execRunner{}
 
-// setRunner swaps the package runner and returns a function that restores the
-// previous one. Test-only.
+// SetRunnerForTest swaps the package runner and returns a function that
+// restores the previous one.
+//
+// This is the injection point for tests in any package: cmd/agent's handler
+// and manager tests drive real code paths through a FakeRunner rather than
+// shelling out, which is what makes them runnable without root or Linux.
 //
 // defaultRunner is package state, so tests that call this must not use
 // t.Parallel().
-func setRunner(r Runner) (restore func()) {
+func SetRunnerForTest(r Runner) (restore func()) {
 	prev := defaultRunner
 	defaultRunner = r
 	return func() { defaultRunner = prev }
