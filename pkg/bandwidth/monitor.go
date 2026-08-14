@@ -30,7 +30,9 @@ type Monitor struct {
 	peers    map[string]*PeerBandwidth // keyed by public key
 	previous map[string]wireguard.PeerTransfer
 
-	stopCh chan struct{}
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	done     chan struct{} // closed when loop() exits
 }
 
 // NewMonitor creates a bandwidth monitor for the given WireGuard interface.
@@ -41,6 +43,7 @@ func NewMonitor(interfaceName string, pollInterval time.Duration) *Monitor {
 		peers:         make(map[string]*PeerBandwidth),
 		previous:      make(map[string]wireguard.PeerTransfer),
 		stopCh:        make(chan struct{}),
+		done:          make(chan struct{}),
 	}
 }
 
@@ -49,9 +52,11 @@ func (m *Monitor) Start() {
 	go m.loop()
 }
 
-// Stop signals the polling loop to exit.
+// Stop signals the polling loop to exit. Safe to call any number of times
+// from any goroutine: teardown can fail partway and be retried, and a second
+// Stop must not panic on an already-closed channel.
 func (m *Monitor) Stop() {
-	close(m.stopCh)
+	m.stopOnce.Do(func() { close(m.stopCh) })
 }
 
 // GetAllPeers returns a snapshot of bandwidth data for all known peers.
@@ -80,8 +85,18 @@ func (m *Monitor) GetPeer(publicKey string) (*PeerBandwidth, bool) {
 }
 
 func (m *Monitor) loop() {
+	defer close(m.done)
+
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
+
+	// Already stopped before we got scheduled — don't shell out to wg for an
+	// interface the caller has finished with.
+	select {
+	case <-m.stopCh:
+		return
+	default:
+	}
 
 	// Do an initial poll immediately.
 	m.poll()
