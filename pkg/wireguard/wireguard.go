@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,16 +44,13 @@ type PeerConfig struct {
 // GenerateKeyPair generates a new WireGuard private/public key pair using the
 // wg command-line tool. Requires wireguard-tools to be installed.
 func GenerateKeyPair() (*KeyPair, error) {
-	privCmd := exec.Command("wg", "genkey")
-	privOut, err := privCmd.Output()
+	privOut, err := output("wg", "genkey")
 	if err != nil {
 		return nil, fmt.Errorf("wg genkey: %w", err)
 	}
 	privateKey := strings.TrimSpace(string(privOut))
 
-	pubCmd := exec.Command("wg", "pubkey")
-	pubCmd.Stdin = strings.NewReader(privateKey)
-	pubOut, err := pubCmd.Output()
+	pubOut, err := outputStdin(privateKey, "wg", "pubkey")
 	if err != nil {
 		return nil, fmt.Errorf("wg pubkey: %w", err)
 	}
@@ -114,9 +110,9 @@ func sanitizeConfigValue(s string) string {
 // per-peer transfer statistics. Each output line has the format:
 //
 //	<public_key>\t<bytes_received>\t<bytes_sent>
-func ParseWgShow(output string) ([]PeerTransfer, error) {
+func ParseWgShow(raw string) ([]PeerTransfer, error) {
 	var peers []PeerTransfer
-	scanner := bufio.NewScanner(strings.NewReader(output))
+	scanner := bufio.NewScanner(strings.NewReader(raw))
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -170,7 +166,7 @@ func CreateInterface(name string, listenPort int, address string) (string, error
 	defer wgMu.Unlock()
 
 	// Create the interface.
-	if out, err := exec.Command("ip", "link", "add", name, "type", "wireguard").CombinedOutput(); err != nil {
+	if out, err := combined("ip", "link", "add", name, "type", "wireguard"); err != nil {
 		return "", fmt.Errorf("ip link add %s: %s: %w", name, string(out), err)
 	}
 
@@ -178,40 +174,40 @@ func CreateInterface(name string, listenPort int, address string) (string, error
 	kp, err := GenerateKeyPair()
 	if err != nil {
 		// Clean up the interface we just created.
-		_ = exec.Command("ip", "link", "delete", name).Run()
+		_ = quiet("ip", "link", "delete", name)
 		return "", fmt.Errorf("generate keypair: %w", err)
 	}
 
 	// Write private key to a temp file with restricted permissions.
 	tmpFile := fmt.Sprintf("/tmp/wg-privkey-%s", name)
 	if err := os.WriteFile(tmpFile, []byte(kp.PrivateKey), 0600); err != nil {
-		_ = exec.Command("ip", "link", "delete", name).Run()
+		_ = quiet("ip", "link", "delete", name)
 		return "", fmt.Errorf("write private key: %w", err)
 	}
 	defer os.Remove(tmpFile)
 
 	// Configure WireGuard with private key and listen port.
-	if out, err := exec.Command("wg", "set", name, "private-key", tmpFile, "listen-port", strconv.Itoa(listenPort)).CombinedOutput(); err != nil {
-		_ = exec.Command("ip", "link", "delete", name).Run()
+	if out, err := combined("wg", "set", name, "private-key", tmpFile, "listen-port", strconv.Itoa(listenPort)); err != nil {
+		_ = quiet("ip", "link", "delete", name)
 		return "", fmt.Errorf("wg set %s: %s: %w", name, string(out), err)
 	}
 
 	// Assign address.
-	if out, err := exec.Command("ip", "addr", "add", address, "dev", name).CombinedOutput(); err != nil {
-		_ = exec.Command("ip", "link", "delete", name).Run()
+	if out, err := combined("ip", "addr", "add", address, "dev", name); err != nil {
+		_ = quiet("ip", "link", "delete", name)
 		return "", fmt.Errorf("ip addr add %s: %s: %w", address, string(out), err)
 	}
 
 	// Bring interface up.
-	if out, err := exec.Command("ip", "link", "set", name, "up").CombinedOutput(); err != nil {
-		_ = exec.Command("ip", "link", "delete", name).Run()
+	if out, err := combined("ip", "link", "set", name, "up"); err != nil {
+		_ = quiet("ip", "link", "delete", name)
 		return "", fmt.Errorf("ip link set %s up: %s: %w", name, string(out), err)
 	}
 
 	// Extract subnet from address for NAT rule.
 	_, subnet, err := net.ParseCIDR(address)
 	if err == nil {
-		_ = exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", subnet.String(), "-o", "eth0", "-j", "MASQUERADE").Run()
+		_ = quiet("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", subnet.String(), "-o", "eth0", "-j", "MASQUERADE")
 	}
 
 	return kp.PublicKey, nil
@@ -230,10 +226,10 @@ func DestroyInterface(name string, subnet string) error {
 	defer wgMu.Unlock()
 
 	// Remove NAT rule (best-effort).
-	_ = exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", subnet, "-o", "eth0", "-j", "MASQUERADE").Run()
+	_ = quiet("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", subnet, "-o", "eth0", "-j", "MASQUERADE")
 
 	// Delete the interface.
-	if out, err := exec.Command("ip", "link", "delete", name).CombinedOutput(); err != nil {
+	if out, err := combined("ip", "link", "delete", name); err != nil {
 		return fmt.Errorf("ip link delete %s: %s: %w", name, string(out), err)
 	}
 	return nil
@@ -241,8 +237,7 @@ func DestroyInterface(name string, subnet string) error {
 
 // ListInterfaces returns active WireGuard interface names.
 func ListInterfaces() ([]string, error) {
-	cmd := exec.Command("wg", "show", "interfaces")
-	out, err := cmd.Output()
+	out, err := output("wg", "show", "interfaces")
 	if err != nil {
 		return nil, fmt.Errorf("wg show interfaces: %w", err)
 	}
@@ -266,8 +261,7 @@ func ShowPeers(interfaceName string) ([]PeerInfo, error) {
 	if err := validate.InterfaceName(interfaceName); err != nil {
 		return nil, fmt.Errorf("invalid interface name: %w", err)
 	}
-	cmd := exec.Command("wg", "show", interfaceName, "dump")
-	out, err := cmd.Output()
+	out, err := output("wg", "show", interfaceName, "dump")
 	if err != nil {
 		return nil, fmt.Errorf("wg show %s dump: %w", interfaceName, err)
 	}
@@ -312,11 +306,9 @@ func ApplyConfig(interfaceName, configPath string) error {
 	defer wgMu.Unlock()
 
 	// Bring down existing interface (ignore error if not up)
-	downCmd := exec.Command("wg-quick", "down", interfaceName)
-	_ = downCmd.Run()
+	_ = quiet("wg-quick", "down", interfaceName)
 
-	upCmd := exec.Command("wg-quick", "up", configPath)
-	if out, err := upCmd.CombinedOutput(); err != nil {
+	if out, err := combined("wg-quick", "up", configPath); err != nil {
 		return fmt.Errorf("wg-quick up %s: %s: %w", configPath, string(out), err)
 	}
 	return nil
@@ -328,8 +320,7 @@ func ReadServerPublicKey(interfaceName string) (string, error) {
 	if err := validate.InterfaceName(interfaceName); err != nil {
 		return "", fmt.Errorf("invalid interface name: %w", err)
 	}
-	cmd := exec.Command("wg", "show", interfaceName, "public-key")
-	out, err := cmd.Output()
+	out, err := output("wg", "show", interfaceName, "public-key")
 	if err != nil {
 		return "", fmt.Errorf("wg show %s public-key: %w", interfaceName, err)
 	}
@@ -343,8 +334,7 @@ func ReadServerEndpoint(interfaceName string) (string, error) {
 	if err := validate.InterfaceName(interfaceName); err != nil {
 		return "", fmt.Errorf("invalid interface name: %w", err)
 	}
-	cmd := exec.Command("wg", "show", interfaceName, "listen-port")
-	out, err := cmd.Output()
+	out, err := output("wg", "show", interfaceName, "listen-port")
 	if err != nil {
 		return "", fmt.Errorf("wg show %s listen-port: %w", interfaceName, err)
 	}
@@ -354,8 +344,7 @@ func ReadServerEndpoint(interfaceName string) (string, error) {
 	}
 
 	// Try to determine external IP from default route interface.
-	ipCmd := exec.Command("hostname", "-I")
-	ipOut, err := ipCmd.Output()
+	ipOut, err := output("hostname", "-I")
 	if err != nil {
 		return ":" + port, nil
 	}
@@ -380,8 +369,7 @@ func SyncPeers(interfaceName string, publicKey string, allowedIPs string, remove
 	defer wgMu.Unlock()
 
 	if remove {
-		cmd := exec.Command("wg", "set", interfaceName, "peer", publicKey, "remove")
-		if out, err := cmd.CombinedOutput(); err != nil {
+		if out, err := combined("wg", "set", interfaceName, "peer", publicKey, "remove"); err != nil {
 			return fmt.Errorf("wg set remove peer: %s: %w", string(out), err)
 		}
 		return nil
@@ -391,8 +379,7 @@ func SyncPeers(interfaceName string, publicKey string, allowedIPs string, remove
 		return fmt.Errorf("invalid allowed IPs: %w", err)
 	}
 
-	cmd := exec.Command("wg", "set", interfaceName, "peer", publicKey, "allowed-ips", allowedIPs)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := combined("wg", "set", interfaceName, "peer", publicKey, "allowed-ips", allowedIPs); err != nil {
 		return fmt.Errorf("wg set add peer: %s: %w", string(out), err)
 	}
 	return nil
