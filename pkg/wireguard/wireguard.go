@@ -213,26 +213,50 @@ func CreateInterface(name string, listenPort int, address string) (string, error
 	return kp.PublicKey, nil
 }
 
-// DestroyInterface tears down a WireGuard interface and cleans up NAT rules.
+// DestroyInterface tears down a WireGuard interface and cleans up its NAT rule.
+//
+// An empty subnet skips NAT cleanup and only removes the interface. Callers
+// that cannot determine the interface's subnet must pass "" rather than a
+// catch-all: a wildcard would match, and delete, the node-wide MASQUERADE rule
+// that every other interface depends on. A wildcard passed anyway is ignored
+// for the same reason.
 func DestroyInterface(name string, subnet string) error {
 	if err := validate.InterfaceName(name); err != nil {
 		return fmt.Errorf("invalid interface name: %w", err)
 	}
-	if err := validate.CIDR(subnet); err != nil {
-		return fmt.Errorf("invalid subnet: %w", err)
+	if subnet != "" {
+		if err := validate.CIDR(subnet); err != nil {
+			return fmt.Errorf("invalid subnet: %w", err)
+		}
 	}
 
 	wgMu.Lock()
 	defer wgMu.Unlock()
 
-	// Remove NAT rule (best-effort).
-	_ = quiet("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", subnet, "-o", "eth0", "-j", "MASQUERADE")
+	// Remove this interface's NAT rule (best-effort). Skipped when the subnet
+	// is unknown or a catch-all — see the note on wildcards above.
+	if subnet != "" && !isWildcardSubnet(subnet) {
+		_ = quiet("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", subnet, "-o", "eth0", "-j", "MASQUERADE")
+	}
 
 	// Delete the interface.
 	if out, err := combined("ip", "link", "delete", name); err != nil {
 		return fmt.Errorf("ip link delete %s: %s: %w", name, string(out), err)
 	}
 	return nil
+}
+
+// isWildcardSubnet reports whether a CIDR covers the entire address space.
+// Deleting a NAT rule scoped to one of these would take out the node-wide
+// MASQUERADE rule installed by scripts/setup-node.sh, cutting egress for every
+// peer on the host rather than just the interface being destroyed.
+func isWildcardSubnet(subnet string) bool {
+	_, ipNet, err := net.ParseCIDR(subnet)
+	if err != nil {
+		return false
+	}
+	ones, bits := ipNet.Mask.Size()
+	return ones == 0 && bits > 0
 }
 
 // ListInterfaces returns active WireGuard interface names.

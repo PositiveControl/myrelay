@@ -208,3 +208,57 @@ func TestDestroyInterface_ValidationRunsNoCommands(t *testing.T) {
 		t.Fatalf("validation failure still ran %d commands: %v", len(f.calls), f.names())
 	}
 }
+
+// TestDestroyInterface_SkipsNATCleanupWhenSubnetUnknown pins the guard added
+// for myrelay-3bj: with no usable subnet, teardown must remove the interface
+// and leave iptables untouched.
+func TestDestroyInterface_SkipsNATCleanupWhenSubnetUnknown(t *testing.T) {
+	f := newFake(t)
+
+	if err := DestroyInterface("wg-a", ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := f.names()
+	if len(got) != 1 || got[0] != "ip link delete wg-a" {
+		t.Fatalf("ran %v, want only the link delete", got)
+	}
+}
+
+// TestDestroyInterface_IgnoresWildcardSubnet is the regression test for the
+// bug itself. A catch-all subnet matches the node-wide MASQUERADE rule from
+// scripts/setup-node.sh, so honouring it would cut egress for every peer on
+// the host.
+func TestDestroyInterface_IgnoresWildcardSubnet(t *testing.T) {
+	for _, subnet := range []string{"0.0.0.0/0", "1.2.3.4/0", "::/0"} {
+		t.Run(subnet, func(t *testing.T) {
+			f := newFake(t)
+
+			if err := DestroyInterface("wg-a", subnet); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			for _, c := range f.names() {
+				if strings.HasPrefix(c, "iptables") {
+					t.Fatalf("wildcard subnet %q reached iptables: %q", subnet, c)
+				}
+			}
+			if len(f.names()) != 1 {
+				t.Fatalf("ran %v, want only the link delete", f.names())
+			}
+		})
+	}
+}
+
+// TestDestroyInterface_RejectsInvalidSubnet keeps the existing validation:
+// garbage is an error, not a silently skipped cleanup, and runs no commands.
+func TestDestroyInterface_RejectsInvalidSubnet(t *testing.T) {
+	f := newFake(t)
+
+	if err := DestroyInterface("wg-a", "not-a-cidr"); err == nil {
+		t.Fatal("expected an error for an invalid subnet")
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("validation failure still ran %d commands: %v", len(f.calls), f.names())
+	}
+}
