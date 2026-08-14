@@ -106,8 +106,6 @@ func (m *InterfaceManager) DestroyInterface(name string) error {
 		return fmt.Errorf("interface %s not found", name)
 	}
 
-	info.Monitor.Stop()
-
 	// Extract subnet from address for NAT cleanup.
 	subnet := "0.0.0.0/0"
 	if _, cidr, err := net.ParseCIDR(info.Address); err == nil {
@@ -117,6 +115,11 @@ func (m *InterfaceManager) DestroyInterface(name string) error {
 	if err := wireguard.DestroyInterface(name, subnet); err != nil {
 		return fmt.Errorf("destroy interface %s: %w", name, err)
 	}
+
+	// Stop the monitor only once the interface is actually gone. On a failed
+	// teardown the interface stays registered and keeps passing traffic, so
+	// its bandwidth accounting has to keep running until a retry succeeds.
+	info.Monitor.Stop()
 
 	delete(m.tokenToIface, info.UserToken)
 	delete(m.interfaces, name)
