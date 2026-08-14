@@ -106,10 +106,10 @@ func (m *InterfaceManager) DestroyInterface(name string) error {
 		return fmt.Errorf("interface %s not found", name)
 	}
 
-	// Extract subnet from address for NAT cleanup.
-	subnet := "0.0.0.0/0"
-	if _, cidr, err := net.ParseCIDR(info.Address); err == nil {
-		subnet = cidr.String()
+	subnet := natSubnet(info.Address)
+	if subnet == "" {
+		log.Printf("Interface %s has an unusable address %q; skipping NAT cleanup on teardown",
+			name, info.Address)
 	}
 
 	if err := wireguard.DestroyInterface(name, subnet); err != nil {
@@ -126,6 +126,27 @@ func (m *InterfaceManager) DestroyInterface(name string) error {
 	m.saveStateLocked()
 	log.Printf("Destroyed interface %s", name)
 	return nil
+}
+
+// natSubnet derives the NAT subnet to clean up from an interface address such
+// as "10.0.0.1/24". It returns "" when the address cannot be resolved to a
+// specific subnet, which tells wireguard.DestroyInterface to leave NAT alone.
+//
+// Returning "" rather than a catch-all is the whole point: a wildcard matches
+// the node-wide MASQUERADE rule from scripts/setup-node.sh, so tearing down one
+// misconfigured interface would cut egress for every peer on the node.
+func natSubnet(address string) string {
+	if address == "" {
+		return ""
+	}
+	_, cidr, err := net.ParseCIDR(address)
+	if err != nil {
+		return ""
+	}
+	if ones, bits := cidr.Mask.Size(); ones == 0 && bits > 0 {
+		return ""
+	}
+	return cidr.String()
 }
 
 // Get returns info for a single interface.
