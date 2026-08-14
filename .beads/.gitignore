@@ -51,6 +51,11 @@ dolt-server.port
 # Backup data (auto-exported JSONL, local-only)
 backup/
 
+# Credential key (secret, per-machine — must never be committed).
+# This was tracked once in be71219 and removed in e49be26; the blob is still
+# reachable in public history, so the key it protects needs rotating.
+.beads-credential-key
+
 # Legacy files (from pre-Dolt versions)
 *.db
 *.db?*
